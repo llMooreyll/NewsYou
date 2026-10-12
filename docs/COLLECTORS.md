@@ -1,11 +1,11 @@
 # Collector reference
 
-`tools/feed_collect.py` implements seven source adapters. All are standard-library only, use no search tools, and are reproducible from a single command.
+`tools/collect.py` implements seven source adapters. All are standard-library only, use no search tools, and are reproducible from a single command.
 
 ```bash
-python tools/feed_collect.py --list-sources
-python tools/feed_collect.py --all --fulltext --outdir data/collected
-python tools/feed_collect.py <source> --limit N --list
+python tools/collect.py --list-sources
+python tools/collect.py --all --fulltext --outdir data/collected
+python tools/collect.py <source> --limit N --list
 ```
 
 Common behaviour:
@@ -44,7 +44,7 @@ Parsed fields: `title`, `url`, `position`, `collector`.
 
 ---
 
-## 3. `sspai` — 少数派 · 派早报
+## 3. `sspai` — 少数派
 
 | | |
 |---|---|
@@ -85,7 +85,7 @@ Useful API fields: `released_time` (unix, reliable) rather than `released_at` (n
 The URL changes every day, so **the date is never hard-coded**. The archive index is read to discover available dates:
 
 ```bash
-python tools/feed_collect.py --dates
+python tools/collect.py --dates
 # 2026-10-12
 # 2026-10-11
 # 2026-10-10
@@ -183,7 +183,7 @@ Each file:
 ## Rendering
 
 ```bash
-python tools/render_digest_html.py --indir data/collected --output site/captures/digest.html
+python tools/render_digest.py --indir data/collected --output site/digest.html
 ```
 
 Produces one styled page: a nav bar per source, 派早报 rendered as a feature card with its nested news items, ranked lists for the hot-search boards, and score/comment metadata for Hacker News.
@@ -209,5 +209,71 @@ To add a source:
 1. write a function `source_<name>(limit, **kwargs) -> list[dict]`;
 2. return a list of dicts with at least `title`, `url`, `source`, `source_name`, `collector`;
 3. register it in `SOURCES` with a default limit;
-4. add it to `ORDER` and `SOURCE_META` in `tools/render_digest_html.py`;
+4. add it to `ORDER` and `SOURCE_META` in `tools/render_digest.py`;
 5. run it with `--list` to verify before wiring it into a schedule.
+
+---
+
+## Addendum: sources added after the first pass
+
+### 晚点 LatePost (`latepost`)
+
+| | |
+|---|---|
+| List | `POST https://www.latepost.com/site/index` with `page` / `limit` |
+| Detail | `https://www.latepost.com/news/dj_detail?id=<id>` |
+
+The homepage list is Vue-rendered, so the rows are **not** in the HTML. The
+inline script calls `$.ajax({type:'post', url:'/site/index', data:{page,limit}})`,
+which returns clean JSON:
+
+```json
+{"code":1,"data":[{"id":"3755","title":"…","abstract":"…","release_time":"10月10日",
+                   "detail_url":"/news/dj_detail?id=3755","is_dj":"0","label":[""]}]}
+```
+
+Two quirks:
+
+1. **The TLS chain is incomplete.** `openssl s_client` shows a valid
+   `CN=www.latepost.com` certificate from Let's Encrypt, but the intermediate is
+   not sent, so strict verification fails — `curl` fails too, not just Python.
+   The collector uses a relaxed context for this host only and documents why.
+2. **Dates appear in three places.** The API gives `release_time` as `10月10日`
+   with no year; the detail header gives `10月10日 14:10`; and the page contains
+   an unrelated `2026/10/10` string. The collector reads the **header element**
+   (`article-header-date`) and infers the year, rather than scraping the first
+   date-looking string — an early version picked a 2023 date out of the body text.
+
+### 极客公园 (`geekpark`)
+
+| | |
+|---|---|
+| Feed | `https://www.geekpark.net/rss` |
+| Article | `https://www.geekpark.net/news/<id>` |
+
+`https://www.geekpark.net/` itself returns **403** to a plain fetch, but `/rss`
+works and carries 30 items with `pubDate`. Titles and descriptions are wrapped in
+`<![CDATA[…]]>`, which must be stripped. The article body sits in
+`<div class="article-content">` and is extracted with the balanced-div scanner.
+
+### Telegram (`telegram`)
+
+Seven channels, one day, all messages:
+
+```bash
+python tools/collect.py telegram --day auto --pages 4 --download-images
+```
+
+- `--day auto` selects the newest day present across the fetched window; at
+  00:20 CST "today" would be nearly empty, so auto is the useful default.
+- `--day today | yesterday | YYYY-MM-DD` pins it explicitly.
+- Pagination walks `?before=<lowest id>` until the target day boundary, so a
+  busy channel is captured completely rather than truncated at 20 posts.
+- `--download-images` stores up to `--images-per-post` photos per message under
+  `data/telegram/media/<channel>/<message_id>/`, and the renderer prefers those
+  local files over live CDN URLs.
+
+Pre-dedupe collapses byte-identical reposts and writes
+`telegram_duplicate_groups.json`. On a real day it finds **zero** groups, because
+channels never repeat each other verbatim — hence the reserved semantic pass in
+[`AI-REVIEW.md`](AI-REVIEW.md).

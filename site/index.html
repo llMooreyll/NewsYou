@@ -1,102 +1,128 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Signal Garden — Personal Newsletter System</title>
-  <style>
-    :root { --bg:#0b1020; --panel:#121a2e; --panel2:#182440; --ink:#edf3ff; --muted:#9eacc8; --line:#2a385b; --accent:#78e6c1; --accent2:#8bb7ff; --warn:#ffc875; --bad:#ff8b9f; }
-    * { box-sizing:border-box; }
-    body { margin:0; background:radial-gradient(circle at 20% 0%,#1b3156 0,transparent 36%),var(--bg); color:var(--ink); font:16px/1.6 system-ui,-apple-system,Segoe UI,sans-serif; }
-    a { color:var(--accent2); text-decoration:none; } a:hover{text-decoration:underline}
-    .wrap { width:min(1160px,calc(100% - 40px)); margin:auto; }
-    header { padding:72px 0 52px; border-bottom:1px solid var(--line); }
-    .eyebrow { color:var(--accent); text-transform:uppercase; letter-spacing:.16em; font-size:.76rem; font-weight:700; }
-    h1 { max-width:820px; font-size:clamp(2.5rem,7vw,5.7rem); line-height:.98; margin:16px 0 22px; letter-spacing:-.06em; }
-    .lede { max-width:720px; color:var(--muted); font-size:1.18rem; }
-    .badges { display:flex; flex-wrap:wrap; gap:10px; margin-top:28px; }
-    .badge { border:1px solid var(--line); background:#10192caa; border-radius:999px; padding:6px 12px; color:#cbd8f5; font-size:.84rem; }
-    section { padding:58px 0; border-bottom:1px solid var(--line); }
-    h2 { font-size:2rem; margin:0 0 24px; letter-spacing:-.03em; }
-    h3 { margin:0 0 8px; font-size:1.05rem; }
-    .muted { color:var(--muted); }
-    .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }
-    .card { background:linear-gradient(145deg,var(--panel),#0f172b); border:1px solid var(--line); border-radius:18px; padding:20px; }
-    .card p { color:var(--muted); margin:8px 0 0; }
-    .number { color:var(--accent); font-size:.85rem; font-weight:800; }
-    .pipeline { display:grid; grid-template-columns:repeat(7,1fr); gap:8px; align-items:stretch; }
-    .step { position:relative; background:var(--panel2); border:1px solid var(--line); border-radius:14px; padding:15px 12px; min-height:124px; }
-    .step:not(:last-child)::after { content:'→'; position:absolute; right:-15px; top:42%; color:var(--accent); z-index:2; font-size:1.2rem; }
-    .step small { display:block; color:var(--muted); margin-top:8px; font-size:.78rem; }
-    .matrix { overflow:auto; border:1px solid var(--line); border-radius:16px; }
-    table { width:100%; min-width:760px; border-collapse:collapse; }
-    th,td { padding:14px 16px; text-align:left; border-bottom:1px solid var(--line); vertical-align:top; }
-    th { color:var(--accent); font-size:.8rem; text-transform:uppercase; letter-spacing:.08em; background:#111a31; }
-    tr:last-child td { border-bottom:0; }
-    .status { font-size:.76rem; border-radius:999px; padding:3px 8px; display:inline-block; border:1px solid; white-space:nowrap; }
-    .ok { color:var(--accent); border-color:#347e6b; background:#12372f; }
-    .partial { color:var(--warn); border-color:#806438; background:#3a2b13; }
-    .blocked { color:var(--bad); border-color:#803e4e; background:#3b1824; }
-    .issue { background:#f4f0e8; color:#1e2430; border-radius:18px; padding:30px; max-width:850px; }
-    .issue .kicker { color:#876b35; text-transform:uppercase; letter-spacing:.12em; font-size:.72rem; font-weight:800; }
-    .issue h3 { font-family:Georgia,serif; font-size:1.65rem; margin:8px 0 10px; }
-    .issue p { color:#4d5561; }
-    .issue ul { color:#303744; }
-    pre { overflow:auto; background:#080d18; border:1px solid var(--line); padding:18px; border-radius:14px; color:#c7d8ff; }
-    footer { padding:32px 0 70px; color:var(--muted); }
-    @media (max-width:900px) { .grid{grid-template-columns:1fr 1fr}.pipeline{grid-template-columns:repeat(2,1fr)} .step:not(:last-child)::after{display:none} }
-    @media (max-width:580px) { .wrap{width:min(100% - 24px,1160px)} .grid{grid-template-columns:1fr} header{padding-top:46px} }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Personal Newsletter System</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#000;--fg:#e8e8e8;--dim:#8a8a8a;--dimmer:#5c5c5c;--accent:#ff2f2f;--line:#1a1a1a;--panel:#080808}
+html{background:var(--bg)}
+body{background:var(--bg);color:var(--fg);
+  font:15px/1.7 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--fg);text-decoration:none;border-bottom:1px solid transparent}
+a:hover{color:var(--accent);border-bottom-color:var(--accent)}
+code,.mono,time{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.wrap{width:min(1100px,100% - 32px);margin:0 auto}
+header{border-bottom:1px solid var(--line);padding:64px 0 40px}
+.kicker{color:var(--accent);font-size:11px;letter-spacing:.22em;text-transform:uppercase;font-family:ui-monospace,monospace}
+h1{font-size:clamp(2rem,6vw,4rem);line-height:1.02;letter-spacing:-.03em;margin:18px 0 20px;font-weight:800}
+h1 em{font-style:normal;color:var(--accent)}
+.lede{color:var(--dim);max-width:70ch;font-size:16px}
+.tags{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}
+.tag{border:1px solid var(--line);color:var(--dim);font-size:11px;padding:3px 9px;font-family:ui-monospace,monospace}
+section{padding:46px 0;border-bottom:1px solid var(--line)}
+h2{font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);
+  font-family:ui-monospace,monospace;font-weight:700;margin-bottom:22px}
+h3{font-size:16px;font-weight:700;margin-bottom:6px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1px;background:var(--line)}
+.card{background:var(--panel);padding:20px}
+.card p{color:var(--dim);font-size:13.5px}
+.card .n{color:var(--accent);font-size:11px;font-family:ui-monospace,monospace;margin-bottom:10px;display:block}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--accent);font-size:11px;letter-spacing:.1em;text-transform:uppercase;font-family:ui-monospace,monospace;font-weight:700}
+td.mono{font-family:ui-monospace,monospace;color:var(--dim);font-size:12.5px}
+.ok{color:var(--fg)}.warn{color:var(--dim)}.bad{color:var(--dimmer)}
+pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto;
+  color:#c9c9c9;font-size:12.5px;font-family:ui-monospace,monospace}
+footer{padding:36px 0 80px;color:var(--dimmer);font-size:12px}
+footer code{color:var(--dim)}
+@media(max-width:640px){.wrap{width:calc(100% - 24px)}header{padding-top:44px}}
+</style>
 </head>
 <body>
-  <header><div class="wrap">
-    <div class="eyebrow">Personal content intelligence · design milestone 0</div>
-    <h1>Less noise.<br><span style="color:var(--accent)">More signal.</span></h1>
-    <p class="lede">A local-first newsletter system for technology, film, and society. It gathers structured feeds, user-selected social content, podcasts, and browser-visible pages—then preserves evidence before producing an editorial digest.</p>
-    <div class="badges"><span class="badge">RSS / Atom first</span><span class="badge">Official APIs where possible</span><span class="badge">Helium CDP capture</span><span class="badge">Chinese + English</span><span class="badge">Human review</span></div>
-  </div></header>
+<header><div class="wrap">
+  <div class="kicker">Personal content intelligence</div>
+  <h1>Less noise.<br><em>More signal.</em></h1>
+  <p class="lede">A local-first newsletter pipeline for technology, film, and society. It collects ten sources with plain HTTP, preserves a timestamp and original link for every item, and renders one reviewable digest.</p>
+  <div class="tags">
+    <span class="tag">10 sources</span>
+    <span class="tag">stdlib only</span>
+    <span class="tag">no search tools</span>
+    <span class="tag">中文 + English</span>
+    <span class="tag">evidence first</span>
+  </div>
+</div></header>
 
-  <main>
-    <section><div class="wrap"><h2>The method</h2><div class="pipeline">
-      <div class="step"><span class="number">01</span><h3>Discover</h3><small>Feeds, APIs, search, URL inbox</small></div>
-      <div class="step"><span class="number">02</span><h3>Capture</h3><small>Raw page, JSON, transcript, metadata</small></div>
-      <div class="step"><span class="number">03</span><h3>Normalize</h3><small>One platform-neutral content model</small></div>
-      <div class="step"><span class="number">04</span><h3>Understand</h3><small>Language, entities, topics, ASR</small></div>
-      <div class="step"><span class="number">05</span><h3>Cluster</h3><small>Duplicates, stories, disagreement</small></div>
-      <div class="step"><span class="number">06</span><h3>Review</h3><small>Evidence panel and editorial queue</small></div>
-      <div class="step"><span class="number">07</span><h3>Publish</h3><small>Markdown, HTML, email, archive RSS</small></div>
-    </div></div></section>
+<main>
+  <section><div class="wrap"><h2>Generated output</h2>
+    <div class="grid">
+      <div class="card">
+        <span class="n">01 / main artifact</span>
+        <h3><a href="digest.html">每日摘要 →</a></h3>
+        <p>Tabbed digest: 少数派派早报全文、Telegram 当日瀑布流、linux.do 六板块、晚点、极客公园、阮一峰、Anyway.Now、Hacker News、微博与知乎热榜。Sticky nav, black/red, keyboard 1–9.</p>
+      </div>
+      <div class="card">
+        <span class="n">02 / telegram</span>
+        <h3><a href="digest.html#telegram">当日消息 · 瀑布流</a></h3>
+        <p>Seven channels for one day: @MaiTungNews @tnews365 @zaihuapd @xhqcankao @GodlyNews1 @NewlearnerChannel @DNSPODT. Masonry cards, local images, reactions.</p>
+      </div>
+      <div class="card">
+        <span class="n">03 / evidence</span>
+        <h3><a href="captures/wechat-article-zk0KxuLzhmMJ4LPYW_OHMA.html">WeChat capture report</a></h3>
+        <p>The requested article hit an environment-verification wall. The report records the final URL, detection reason, and raw JSON — a failure captured honestly rather than hidden.</p>
+      </div>
+      <div class="card">
+        <span class="n">04 / data</span>
+        <h3><a href="../data/collected/index.json">Raw JSON</a></h3>
+        <p>One file per source plus <code>index.json</code>, <code>telegram_ai_queue.json</code>, and <code>telegram_duplicate_groups.json</code>.</p>
+      </div>
+    </div>
+  </div></section>
 
-    <section><div class="wrap"><h2>Capture layers</h2><div class="grid">
-      <article class="card"><div class="number">A · stable</div><h3>RSS and official APIs</h3><p>Use Podcast RSS, Podcast Index, Reddit OAuth, and the X API when the source, budget, and permissions fit.</p></article>
-      <article class="card"><div class="number">B · practical</div><h3>Public pages</h3><p>Extract readable text, metadata, links, captions, and show notes from a user-selected public URL.</p></article>
-      <article class="card"><div class="number">C · browser</div><h3>Helium DevTools</h3><p>Attach to the existing CDP endpoint, use the already-authorized session, and capture only configured pages.</p></article>
-      <article class="card"><div class="number">D · resilient</div><h3>Manual inbox</h3><p>When a platform changes or blocks automation, a saved URL, pasted passage, or supplied transcript still works.</p></article>
-      <article class="card"><div class="number">Evidence</div><h3>Immutable raw layer</h3><p>Keep the original capture, method, timestamp, adapter version, checksum, and retention policy.</p></article>
-      <article class="card"><div class="number">Editorial</div><h3>Traceable output</h3><p>Every summary points back to a source passage or timestamp. Generated text never replaces the original.</p></article>
-    </div></div></section>
+  <section><div class="wrap"><h2>Pipeline</h2>
+    <table>
+      <thead><tr><th>Stage</th><th>Tool</th><th>Output</th></tr></thead>
+      <tbody>
+        <tr><td>Collect</td><td class="mono">tools/collect.py</td><td class="mono">data/collected/&lt;source&gt;.json</td></tr>
+        <tr><td>Pre-dedupe</td><td class="mono">tools/collect.py</td><td class="mono">telegram_duplicate_groups.json</td></tr>
+        <tr><td>AI review queue</td><td class="mono">tools/collect.py</td><td class="mono">telegram_ai_queue.json</td></tr>
+        <tr><td>Render</td><td class="mono">tools/render_digest.py</td><td class="mono">site/digest.html</td></tr>
+        <tr><td>Browser capture</td><td class="mono">tools/cdp_capture.py</td><td class="mono">data/browser-captures/</td></tr>
+      </tbody>
+    </table>
+  </div></section>
 
-    <section><div class="wrap"><h2>Platform reality check</h2><p class="muted">The system treats access constraints as data, not as problems to hide.</p><div class="matrix"><table><thead><tr><th>Source</th><th>First choice</th><th>Browser / fallback</th><th>Observed status</th></tr></thead><tbody>
-      <tr><td>WeChat</td><td>Authorized Official Account APIs or submitted article URLs</td><td>Rendered article capture through the existing session</td><td><span class="status ok">Official docs captured</span></td></tr>
-      <tr><td>X</td><td>Official API for selected users/lists/searches</td><td>Selected post/thread capture</td><td><span class="status ok">Docs captured</span></td></tr>
-      <tr><td>Bilibili</td><td>Public metadata and available captions</td><td>Permitted media → timestamped ASR</td><td><span class="status blocked">Open-platform page unavailable here</span></td></tr>
-      <tr><td>Weibo</td><td>Authorized Open Platform access</td><td>Selected URL capture</td><td><span class="status blocked">Connection closed here</span></td></tr>
-      <tr><td>Reddit</td><td>OAuth Data API</td><td>Public URL / manual inbox</td><td><span class="status partial">Next structured adapter</span></td></tr>
-      <tr><td>Podcasts</td><td>RSS + Podcast Index discovery</td><td>Show page → feed/transcript discovery</td><td><span class="status ok">Xiaoyuzhou page captured</span></td></tr>
-    </tbody></table></div></div></section>
+  <section><div class="wrap"><h2>Sources</h2>
+    <table>
+      <thead><tr><th>Source</th><th>Endpoint</th><th>Full text</th><th>Timestamp</th></tr></thead>
+      <tbody>
+        <tr><td>少数派</td><td class="mono">/feed + /api/v1/articles</td><td>派早报全文</td><td class="mono">RSS / API</td></tr>
+        <tr><td>Telegram ×7</td><td class="mono">t.me/s/&lt;channel&gt;</td><td>—</td><td class="mono">post</td></tr>
+        <tr><td>linux.do 晚报</td><td class="mono">/issues/&lt;date&gt;/</td><td>—</td><td class="mono">issue date</td></tr>
+        <tr><td>晚点 LatePost</td><td class="mono">POST /site/index</td><td>最新 3 篇</td><td class="mono">article page</td></tr>
+        <tr><td>极客公园</td><td class="mono">/rss</td><td>最新 3 篇</td><td class="mono">RSS</td></tr>
+        <tr><td>阮一峰</td><td class="mono">/blog/atom.xml</td><td>最新一期</td><td class="mono">Atom</td></tr>
+        <tr><td>Anyway.Now</td><td class="mono">/now/</td><td>最新一期</td><td class="mono">page</td></tr>
+        <tr><td>Hacker News</td><td class="mono">firebaseio.com/v0</td><td>—</td><td class="mono">API</td></tr>
+        <tr><td>微博热搜</td><td class="mono">/ajax/side/hotSearch</td><td>—</td><td class="mono">capture time</td></tr>
+        <tr><td>知乎热榜</td><td class="mono">api.zhihu.com/topstory</td><td>—</td><td class="mono">API</td></tr>
+      </tbody>
+    </table>
+  </div></section>
 
-    <section><div class="wrap"><h2>Evidence-backed issue preview</h2><div class="issue"><div class="kicker">Technology · podcast · English</div><h3>What a source item looks like before it becomes a newsletter paragraph</h3><p><strong>Takeaway:</strong> the item keeps the original episode, show notes, transcript link, and timecoded outline alongside any generated summary.</p><ul><li>Source: <a href="https://www.xiaoyuzhoufm.com/podcast/60822a89e37969823dfb8be3">Lex Fridman Podcast on 小宇宙</a></li><li>Canonical feed discovered in page metadata: <a href="https://lexfridman.com/feed/podcast/">lexfridman.com/feed/podcast/</a></li><li>Evidence locator: chapter timestamp such as <code>02:43:55</code></li><li>Processing: browser metadata capture → feed resolution → transcript discovery → editorial review</li></ul><p style="font-size:.86rem">AI-generated copy is a derived layer. The original link and evidence remain the authority.</p></div></div></section>
+  <section><div class="wrap"><h2>Run it</h2>
+<pre>python tools/collect.py --all --download-images --outdir data/collected
+python tools/render_digest.py --indir data/collected --output site/digest.html</pre>
+    <p class="lede" style="margin-top:16px">Standard library only. No installs, no search tools, no system changes.</p>
+  </div></section>
+</main>
 
-    <section><div class="wrap"><h2>Live captures</h2><p class="muted">Real output produced by the tools in this repository. Open directly in a browser.</p><div class="grid">
-      <article class="card"><div class="number">7 sources · 61 items</div><h3><a href="captures/digest.html">每日摘要 · script-generated digest</a></h3><p>少数派派早报（含全文 9 条子项）、阮一峰周刊、linux.do 晚报、Anyway.Now、Hacker News、微博热搜、知乎热榜。Regenerate with one command.</p></article>
-      <article class="card"><div class="number">Telegram · 10 posts · 6 images</div><h3><a href="captures/telegram-zaihuapd-latest10-standalone.html">@zaihuapd digest (self-contained)</a></h3><p>Images inlined as data URIs, so it renders anywhere with no external files. Use this if the linked version shows no images.</p><p><a href="captures/telegram-zaihuapd-latest10.html">Linked version</a> · <a href="../data/telegram/zaihuapd-latest10.json">raw JSON</a></p></article>
-      <article class="card"><div class="number">WeChat · access challenge</div><h3><a href="captures/wechat-article-zk0KxuLzhmMJ4LPYW_OHMA.html">Article capture report</a></h3><p>The requested article hit an environment-verification wall. The report records the final URL, detection reason, and raw JSON — a failure captured honestly rather than hidden.</p></article>
-      <article class="card"><div class="number">How to reproduce</div><h3>Commands</h3><p><code>python tools/telegram_preview.py zaihuapd --limit 10 --download-images</code></p><p><code>python tools/render_telegram_html.py data/telegram/zaihuapd-latest10.json out.html --embed</code></p></article>
-    </div></div></section>
-
-    <section><div class="wrap"><h2>Browser proof</h2><p class="muted">The repository includes a dependency-free CDP probe. It opens a separate tab, extracts bounded rendered text and links, records failures, and closes only the tab it created.</p><pre>python tools/cdp_capture.py https://docs.x.com/x-api/introduction \\
-  --output data/browser-captures/x-api.json</pre><p class="muted">No packages are installed. Existing browser tabs are not closed. Browser captures remain local and can be deleted according to the configured retention policy.</p></div></section>
-  </main>
-  <footer><div class="wrap">Signal Garden · Read <a href="../README.md">README.md</a>, <a href="../docs/ARCHITECTURE.md">architecture</a>, and <a href="../docs/RESEARCH.md">research report</a> to continue.</div></footer>
+<footer><div class="wrap">
+  Read <a href="../README.md">README.md</a>, <a href="../docs/COLLECTORS.md">collectors</a>,
+  <a href="../docs/AI-REVIEW.md">AI review step</a>, and <a href="../docs/ARCHITECTURE.md">architecture</a>.
+  Every item keeps its original link and timestamp; summaries are excerpts, not generated text.
+</div></footer>
 </body>
 </html>

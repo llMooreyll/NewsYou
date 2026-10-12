@@ -4,20 +4,29 @@ This repository is the design starting point for a personal newsletter that coll
 
 ## Current status
 
-The first milestone is the **method and system design**, not a platform-specific scraper. The system is intentionally designed as a layered collector because no single API or scraper can reliably cover WeChat, X, Bilibili, Weibo, Reddit, podcasts, and ordinary websites.
+The pipeline is **working end to end**: ten sources collect with plain HTTP, every item carries a timestamp and its original link, and one command renders a reviewable digest.
+
+```bash
+python tools/collect.py --all --download-images --outdir data/collected
+python tools/render_digest.py --indir data/collected --output site/digest.html
+```
+
+Standard library only. No installs, no search tools, no system changes.
 
 Read the documents in this order:
 
 1. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the end-to-end method.
-2. [`docs/RESEARCH.md`](docs/RESEARCH.md) — online research, reference projects, and decisions.
-3. [`docs/WECHAT.md`](docs/WECHAT.md) — how to get all current and future articles from one WeChat account.
-4. [`docs/TELEGRAM.md`](docs/TELEGRAM.md) — Telegram channel collection plus a Telethon implementation guide.
-5. [`docs/TELEGRAM-NO-API.md`](docs/TELEGRAM-NO-API.md) — five ways to collect Telegram without an `api_id`.
-6. [`docs/RSSHUB.md`](docs/RSSHUB.md) — what RSSHub can and cannot fetch (measured coverage).
-7. [`docs/SOURCE_MATRIX.md`](docs/SOURCE_MATRIX.md) — how each service should be captured, with fallbacks and constraints.
-8. [`docs/CONTENT_MODEL.md`](docs/CONTENT_MODEL.md) — the common data contract and provenance model.
-9. [`config/sources.example.yaml`](config/sources.example.yaml) — the first source configuration format.
-10. [`docs/ROADMAP.md`](docs/ROADMAP.md) — the staged implementation plan.
+2. [`docs/COLLECTORS.md`](docs/COLLECTORS.md) — every source, endpoint, and parsing decision.
+3. [`docs/AI-REVIEW.md`](docs/AI-REVIEW.md) — the reserved AI dedupe/rank step.
+4. [`docs/RESEARCH.md`](docs/RESEARCH.md) — online research, reference projects, and decisions.
+5. [`docs/WECHAT.md`](docs/WECHAT.md) — how to get all current and future articles from one WeChat account.
+6. [`docs/TELEGRAM.md`](docs/TELEGRAM.md) — Telegram channel collection plus a Telethon implementation guide.
+7. [`docs/TELEGRAM-NO-API.md`](docs/TELEGRAM-NO-API.md) — five ways to collect Telegram without an `api_id`.
+8. [`docs/RSSHUB.md`](docs/RSSHUB.md) — what RSSHub can and cannot fetch (measured coverage).
+9. [`docs/SOURCE_MATRIX.md`](docs/SOURCE_MATRIX.md) — how each service should be captured, with fallbacks and constraints.
+10. [`docs/CONTENT_MODEL.md`](docs/CONTENT_MODEL.md) — the common data contract and provenance model.
+11. [`config/sources.example.yaml`](config/sources.example.yaml) — the source configuration format.
+12. [`docs/ROADMAP.md`](docs/ROADMAP.md) — the staged implementation plan.
 
 ## Core principle
 
@@ -47,39 +56,71 @@ python tools/cdp_capture.py https://example.com \
 
 Research captures are stored in [`data/browser-captures/`](data/browser-captures/). They include successful rendered captures and failed-access evidence, because adapter design must account for both.
 
-## Feed and API collectors
+## Collectors
 
-[`tools/feed_collect.py`](tools/feed_collect.py) is a standard-library-only collector for seven sources. No search tools, no installs, fully reproducible:
-
-```bash
-python tools/feed_collect.py --list-sources
-python tools/feed_collect.py --all --fulltext --outdir data/collected
-python tools/feed_collect.py ruanyifeng --limit 10
-python tools/feed_collect.py linuxdo --date 2026-10-11
-python tools/feed_collect.py --dates          # linuxdo issue dates, auto-discovered
-```
-
-| Source | Endpoint | Notes |
-|---|---|---|
-| `ruanyifeng` | Atom feed + `archives.html` | feed gives 3 entries, archive widens to 20 |
-| `anywayfm` | `anyway.fm/now/` link list | newest-first link entries |
-| `sspai` | `/feed` + `/api/v1/articles` | filtered to 派早报; `--fulltext` pulls the article body |
-| `linuxdo` | `linuxdo.club/issues/<date>/` | date discovered from `/issues/`, never hard-coded |
-| `hackernews` | Firebase API | `topstories` + per-item detail |
-| `weibo` | `weibo.com/ajax/side/hotSearch` | hot search board with heat values |
-| `zhihu` | `api.zhihu.com/topstory/hot-list` | hot list with heat and timestamps |
-
-Render everything into one page:
+[`tools/collect.py`](tools/collect.py) implements ten source adapters, standard library only:
 
 ```bash
-python tools/render_digest_html.py --indir data/collected --output site/captures/digest.html
+python tools/collect.py --list-sources
+python tools/collect.py --all --download-images --outdir data/collected
+python tools/collect.py sspai --limit 20
+python tools/collect.py telegram --day 2026-10-12 --pages 4
+python tools/collect.py --dates          # linuxdo issue dates, auto-discovered
 ```
+
+| Source | Endpoint | Full text | Timestamp |
+|---|---|---|---|
+| `sspai` 少数派 | `/feed` + `/api/v1/articles` | 派早报全文，其余仅标题+链接 | RSS / API |
+| `telegram` ×7 | `t.me/s/<channel>` | — | post |
+| `linuxdo` | `/issues/<date>/` | — | issue date |
+| `latepost` 晚点 | `POST /site/index` | 最新 3 篇 | article page |
+| `geekpark` 极客公园 | `/rss` | 最新 3 篇 | RSS |
+| `ruanyifeng` | `/blog/atom.xml` + archives | 最新一期全文 | Atom |
+| `anywayfm` | `/now/` | 最新一期全文 | page |
+| `hackernews` | `firebaseio.com/v0` | — | API |
+| `weibo` 微博热搜 | `/ajax/side/hotSearch` | — | capture time |
+| `zhihu` 知乎热榜 | `api.zhihu.com/topstory` | — | API |
+
+Design rules enforced by the collectors:
+
+- **every item carries a timestamp**; when a source genuinely has none (hot-search boards), `published_at` falls back to the collection time and `date_source` says so instead of inventing a date;
+- **volatile URLs are never hard-coded** — linuxdo issue dates are discovered from its archive index;
+- **full text is scoped** — 派早报, plus the latest issue for 阮一峰 and Anyway.Now, plus the newest articles for 晚点 and 极客公园;
+- **one failing source never aborts the run**; its error lands in `index.json`.
+
+### Telegram
+
+Seven channels for the target day, in one panel:
+
+```
+@MaiTungNews  @tnews365  @zaihuapd  @xhqcankao
+@GodlyNews1  @NewlearnerChannel  @DNSPODT
+```
+
+No `api_id`, no login, no bot — the public `t.me/s/` preview, paged backwards with `?before=<message id>`. `--day auto` picks the newest day present. Images can be saved locally with `--download-images` so the page never depends on a live CDN.
+
+### Rendering
+
+```bash
+python tools/render_digest.py --indir data/collected --output site/digest.html
+```
+
+Black background, single red accent, no rounded corners, sticky tab nav, keyboard `1–9`. Telegram renders as a masonry card wall; linux.do shows its six sections inside one panel; 派早报 renders as a full-text feature.
+
+### The reserved AI step
+
+Seven channels repost the same events in different words, so hash equality finds nothing:
+
+```text
+60 messages · exact-duplicate groups: 0
+```
+
+`tools/collect.py` therefore emits `telegram_ai_queue.json` — a local file containing the messages plus the model instructions and expected response schema — for a semantic dedupe/rank pass. Nothing is sent anywhere automatically. See [`docs/AI-REVIEW.md`](docs/AI-REVIEW.md).
 
 See [`docs/COLLECTORS.md`](docs/COLLECTORS.md) for the full endpoint and parsing reference.
 
 ## Telegram without credentials
-
-[`tools/telegram_preview.py`](tools/telegram_preview.py) collects public Telegram channels via the public `t.me/s/` preview — no `api_id`, no login, no bot. Standard library only.
+[`tools/telegram_preview.py`](tools/telegram_preview.py) is the low-level public-preview fetcher used by `collect.py`, and also runs standalone — no `api_id`, no login, no bot.
 
 ```bash
 python tools/telegram_preview.py telegram --pages 3 \
