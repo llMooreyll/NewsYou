@@ -21,3 +21,6 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# Stray Pi diagnostic tooling, not part of the newsletter project
+tools/_diag/
