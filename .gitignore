@@ -24,3 +24,7 @@ Thumbs.db
 
 # Stray Pi diagnostic tooling, not part of the newsletter project
 tools/_diag/
+
+# Keep locally downloaded Telegram post images so the generated digest renders
+# with images after a clone. Everything else under data/ stays generated.
+!data/telegram/media/
