@@ -69,6 +69,17 @@ python tools/render_digest.py --indir data/processed --output site/digest.html
 
 ### 完整：带 AI 处理
 
+仓库里自带一份**手写的示例决策**（`tools/demo_decisions.py`），用来演示两种决策文件的格式。它不是模型输出，标题里也标注了 `not model output`。想直接看效果：
+
+```bash
+python tools/collect.py --all --outdir data/collected
+python tools/demo_decisions.py      # 用真实重复对生成示例决策
+python tools/ai_apply.py
+python tools/render_digest.py --indir data/processed --output site/digest.html
+```
+
+真实使用时，把 `demo_decisions.py` 换成模型输出即可：
+
 ```bash
 # 1. 抓取
 python tools/collect.py --all --outdir data/collected
@@ -321,6 +332,7 @@ python tools/collect.py --all --no-images            # 不下载图片
 python tools/collect.py --all --no-ai-input          # 不生成 AI 输入
 
 # 阶段 2
+python tools/demo_decisions.py                       # 生成手写示例决策（非模型输出）
 python tools/ai_apply.py                            # 应用决策
 python tools/ai_apply.py --dry-run                  # 只校验
 python tools/ai_apply.py --report                   # 打印改动详情
