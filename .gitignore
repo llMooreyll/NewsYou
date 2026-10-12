@@ -1,0 +1,23 @@
+# Generated / collected output
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local secrets and sessions (never commit)
+.env
+*.session
+.env.local
+secrets/
+credentials/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
