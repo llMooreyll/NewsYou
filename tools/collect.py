@@ -46,6 +46,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ai_stage  # noqa: E402
+from ai_stage import ORDER, SOURCE_LABELS  # noqa: E402
 from telegram_preview import PreviewError  # noqa: E402
 from telegram_preview import fetch as tg_fetch  # noqa: E402
 from telegram_preview import parse_posts as tg_parse_posts  # noqa: E402
@@ -295,6 +297,77 @@ def stamp_now(record: dict) -> dict:
 
 
 # --------------------------------------------------------------------------
+# Full-text policy
+#
+# Default is "today": only items published on the current CST date get their
+# full text fetched. Older items keep title + link. Pass a different policy to
+# widen it:
+#     today   (default) items published today only
+#     latest            today's items, plus the newest one (weekly/monthly sources)
+#     all               every item that supports full text
+#     none              no full text at all
+#     3                 the newest 3 items regardless of date
+# --------------------------------------------------------------------------
+
+FULLTEXT_DEFAULT = "today"
+FULLTEXT_MODES = ("today", "latest", "all", "none")
+
+
+def mark_today(items: list[dict], today=None) -> None:
+    """Annotate every item with whether it was published on the current CST day."""
+    today = today or datetime.now(CST).date()
+    for entry in items:
+        published = to_cst(entry.get("published_at"))
+        entry["is_today"] = bool(published and published.date() == today)
+
+
+def fulltext_targets(items: list[dict], mode=FULLTEXT_DEFAULT, today=None) -> list[dict]:
+    """Return the items that should receive full text under the given policy."""
+    today = today or datetime.now(CST).date()
+    mark_today(items, today)
+
+    if mode is None:
+        mode = FULLTEXT_DEFAULT
+    mode = str(mode).strip().lower()
+
+    if mode in ("none", "off", "0"):
+        return []
+    if mode == "all":
+        return list(items)
+    if mode == "latest":
+        picked = [e for e in items if e.get("is_today")]
+        if items and items[0] not in picked:
+            picked.append(items[0])
+        return picked
+    if mode.isdigit():
+        return list(items)[: int(mode)]
+    # "today" and anything unrecognised
+    return [e for e in items if e.get("is_today")]
+
+
+def fulltext_scope_label(entry: dict) -> str:
+    """Human label describing why this item received full text."""
+    return "today" if entry.get("is_today") else "requested"
+
+
+def source_status(items: list[dict], today=None) -> dict:
+    """Freshness summary for one source, rendered as a badge in the digest."""
+    today = today or datetime.now(CST).date()
+    mark_today(items, today)
+    dated = [to_cst(e.get("published_at")) for e in items]
+    dated = [d for d in dated if d]
+    latest = max(dated) if dated else None
+    return {
+        "day": today.isoformat(),
+        "updated_today": any(e.get("is_today") for e in items),
+        "latest_published_at": latest.isoformat() if latest else None,
+        "staleness_days": (today - latest.date()).days if latest else None,
+        "count": len(items),
+        "fulltext_fetched": sum(1 for e in items if e.get("body_text")),
+    }
+
+
+# --------------------------------------------------------------------------
 # 1. 阮一峰的网络日志
 # --------------------------------------------------------------------------
 
@@ -307,7 +380,7 @@ def ruanyifeng_body(url: str) -> str:
     return strip_tags(block)
 
 
-def source_ruanyifeng(limit: int = 10, fulltext_latest: bool = True, **_):
+def source_ruanyifeng(limit: int = 10, fulltext: str | int = FULLTEXT_DEFAULT, **_):
     items: list[dict] = []
     try:
         atom = fetch("https://www.ruanyifeng.com/blog/atom.xml")
@@ -355,14 +428,8 @@ def source_ruanyifeng(limit: int = 10, fulltext_latest: bool = True, **_):
             print(f"  ! archives failed: {exc}", file=sys.stderr)
 
     items = items[:limit]
-    today = datetime.now(CST).date()
 
-    for index, entry in enumerate(items):
-        published = to_cst(entry["published_at"])
-        is_today = bool(published and published.date() == today)
-        is_latest = index == 0
-        if not (is_today or (fulltext_latest and is_latest)):
-            continue
+    for entry in fulltext_targets(items, fulltext):
         try:
             body = ruanyifeng_body(entry["url"])
         except FetchError as exc:
@@ -370,7 +437,7 @@ def source_ruanyifeng(limit: int = 10, fulltext_latest: bool = True, **_):
             continue
         if body:
             entry["body_text"] = body
-            entry["extra"]["body_scope"] = "today" if is_today else "latest"
+            entry["extra"]["body_scope"] = fulltext_scope_label(entry)
             entry["extra"]["body_chars"] = len(body)
         time.sleep(0.4)
 
@@ -381,7 +448,7 @@ def source_ruanyifeng(limit: int = 10, fulltext_latest: bool = True, **_):
 # 2. Anyway.Now
 # --------------------------------------------------------------------------
 
-def source_anywayfm(limit: int = 10, fulltext_latest: bool = True, **_):
+def source_anywayfm(limit: int = 10, fulltext: str | int = FULLTEXT_DEFAULT, **_):
     page = fetch("https://anyway.fm/now/")
     items: list[dict] = []
     # split on the item boundary so each block is self-contained
@@ -410,12 +477,7 @@ def source_anywayfm(limit: int = 10, fulltext_latest: bool = True, **_):
             break
 
     today = datetime.now(CST).date()
-    for index, entry in enumerate(items):
-        published = to_cst(entry["published_at"])
-        is_today = bool(published and published.date() == today)
-        is_latest = index == 0
-        if not (is_today or (fulltext_latest and is_latest)):
-            continue
+    for entry in fulltext_targets(items, fulltext, today):
         try:
             detail = fetch(entry["url"])
         except FetchError as exc:
@@ -425,7 +487,7 @@ def source_anywayfm(limit: int = 10, fulltext_latest: bool = True, **_):
         if block:
             body = strip_tags(block)
             entry["body_text"] = body
-            entry["extra"]["body_scope"] = "today" if is_today else "latest"
+            entry["extra"]["body_scope"] = fulltext_scope_label(entry)
             entry["extra"]["body_chars"] = len(body)
             heading = re.search(r"<h1[^>]*>(.*?)</h1>", detail, re.S)
             if heading:
@@ -473,8 +535,8 @@ def sspai_body(article_id: int) -> dict:
     }
 
 
-def source_sspai(limit: int = 20, **_):
-    """All items. 派早报 gets full text; everything else keeps title + link."""
+def source_sspai(limit: int = 20, fulltext: str | int = FULLTEXT_DEFAULT, **_):
+    """All items. 派早报 gets full text when the policy allows; others stay title + link."""
     items: list[dict] = []
     seen: set[str] = set()
 
@@ -525,8 +587,14 @@ def source_sspai(limit: int = 20, **_):
     items.sort(key=lambda x: str(x.get("published_at") or ""), reverse=True)
     items = items[:limit]
 
+    # Only 派早报 supports full text here, so the policy is applied to that
+    # eligible subset — otherwise `latest` would target a 派评 item.
+    eligible = [e for e in items if "派早报" in e["title"]]
+    targets = {id(e) for e in fulltext_targets(eligible, fulltext)}
     for entry in items:
         if "派早报" not in entry["title"]:
+            continue
+        if id(entry) not in targets:
             continue
         try:
             article_id = int(entry["url"].rstrip("/").rsplit("/", 1)[-1])
@@ -542,6 +610,7 @@ def source_sspai(limit: int = 20, **_):
         if body.get("released_at"):
             entry["published_at"] = body["released_at"]
         entry["extra"]["fulltext"] = True
+        entry["extra"]["body_scope"] = fulltext_scope_label(entry)
         entry["extra"]["body_chars"] = len(body.get("body_text") or "")
         time.sleep(0.5)
 
@@ -643,7 +712,7 @@ def latepost_list(pages: int = 1, per_page: int = 20) -> list[dict]:
     return out
 
 
-def source_latepost(limit: int = 15, fulltext: int = 3, **_):
+def source_latepost(limit: int = 15, fulltext: str | int = FULLTEXT_DEFAULT, **_):
     rows = latepost_list(pages=max(1, (limit // 20) + 1), per_page=20)
     now = datetime.now(CST)
     items: list[dict] = []
@@ -659,7 +728,7 @@ def source_latepost(limit: int = 15, fulltext: int = 3, **_):
             extra={"collector": "site_index_api", "id": row.get("id"), "is_exclusive": row.get("is_dj") == "1"},
         ))
 
-    for entry in items[:max(0, fulltext)]:
+    for entry in fulltext_targets(items, fulltext):
         try:
             detail = fetch(entry["url"], relaxed_tls=True)
         except FetchError as exc:
@@ -682,6 +751,7 @@ def source_latepost(limit: int = 15, fulltext: int = 3, **_):
             entry["body_text"] = body
             entry["extra"]["body_chars"] = len(body)
             entry["extra"]["fulltext"] = True
+            entry["extra"]["body_scope"] = fulltext_scope_label(entry)
         time.sleep(0.4)
 
     return items
@@ -691,7 +761,7 @@ def source_latepost(limit: int = 15, fulltext: int = 3, **_):
 # 6. 极客公园
 # --------------------------------------------------------------------------
 
-def source_geekpark(limit: int = 15, fulltext: int = 3, **_):
+def source_geekpark(limit: int = 15, fulltext: str | int = FULLTEXT_DEFAULT, **_):
     feed = fetch("https://www.geekpark.net/rss")
     items: list[dict] = []
     for entry in re.findall(r"<item>.*?</item>", feed, re.S):
@@ -710,7 +780,7 @@ def source_geekpark(limit: int = 15, fulltext: int = 3, **_):
         if len(items) >= limit:
             break
 
-    for entry in items[:max(0, fulltext)]:
+    for entry in fulltext_targets(items, fulltext):
         try:
             page = fetch(entry["url"])
         except FetchError as exc:
@@ -722,6 +792,7 @@ def source_geekpark(limit: int = 15, fulltext: int = 3, **_):
             entry["body_text"] = body
             entry["extra"]["body_chars"] = len(body)
             entry["extra"]["fulltext"] = True
+            entry["extra"]["body_scope"] = fulltext_scope_label(entry)
         time.sleep(0.4)
 
     return items
@@ -944,64 +1015,15 @@ def dedupe(items: list[dict]) -> tuple[list[dict], list[dict]]:
     return kept, groups
 
 
-AI_QUEUE_PROMPT = """You are deduplicating and ranking a day of Telegram news posts
-collected from several Chinese-language channels.
-
-Input: a JSON array of items. Each item has `id`, `channel`, `title`, `summary`
-(the post text), `published_at` (CST), `url`, and `content_hash`.
-
-Task:
-1. CLUSTER items that report the same underlying news event, even when the
-   wording, channel, or framing differs.
-2. For each cluster choose one `primary` item (the most complete and specific
-   version) and list the other item ids as `duplicates`.
-3. Merge the facts across the cluster into one neutral `summary` (2-3 sentences,
-   no marketing language, no speculation). Keep numbers exact.
-4. Assign `topics` from: technology, ai, business, policy, society, security,
-   internet, other.
-5. Score `importance` 0-100 based on impact and information density, not
-   channel popularity.
-6. Return JSON only, matching this schema:
-
-{
-  "clusters": [
-    {
-      "primary_id": "...",
-      "duplicate_ids": ["..."],
-      "title": "neutral headline",
-      "summary": "merged neutral summary",
-      "topics": ["ai"],
-      "importance": 82,
-      "sources": ["@zaihuapd", "@tnews365"]
-    }
-  ]
-}
-
-Rules: never invent facts that are not in the input; if two items conflict,
-note the conflict in the summary instead of choosing silently; preserve the
-original language of the source where possible.
-"""
-
-
-def build_ai_queue(telegram_items: list[dict]) -> dict:
-    return {
-        "purpose": "Reserved step: AI deduplication and ranking of Telegram messages.",
-        "generated_at": datetime.now(CST).isoformat(),
-        "model_instructions": AI_QUEUE_PROMPT,
-        "count": len(telegram_items),
-        "items": [
-            {
-                "id": f"{e['extra'].get('channel')}:{e['extra'].get('message_id')}",
-                "channel": e["extra"].get("channel"),
-                "title": e["title"],
-                "summary": e["summary"],
-                "published_at": e["published_at"],
-                "url": e["url"],
-                "content_hash": e["content_hash"],
-            }
-            for e in telegram_items
-        ],
-    }
+# --------------------------------------------------------------------------
+# Stage 2 lives in tools/ai_stage.py
+#
+#   build_telegram_input()  -> data/ai/telegram_input.json   (stage 2a)
+#   build_digest_input()    -> data/ai/digest_input.json     (stage 2b)
+#
+# The model returns decisions only; tools/ai_apply.py validates and applies
+# them into data/processed/. See docs/PIPELINE.md.
+# --------------------------------------------------------------------------
 
 
 # --------------------------------------------------------------------------
@@ -1021,8 +1043,7 @@ SOURCES: dict[str, tuple] = {
     "telegram": (source_telegram, 400),
 }
 
-ORDER = ["sspai", "telegram", "linuxdo", "latepost", "geekpark", "ruanyifeng",
-         "anywayfm", "hackernews", "weibo", "zhihu"]
+ORDER = ai_stage.ORDER
 
 
 def main() -> int:
@@ -1031,13 +1052,18 @@ def main() -> int:
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--outdir", type=Path, default=Path("data/collected"))
+    parser.add_argument("--aidir", type=Path, default=Path("data/ai"),
+                        help="where stage 2 input files are written")
     parser.add_argument("--date", default=None, help="linuxdo issue date")
     parser.add_argument("--day", default="auto", help="telegram day: today | yesterday | auto | YYYY-MM-DD")
     parser.add_argument("--pages", type=int, default=4, help="telegram pages per channel")
-    parser.add_argument("--no-fulltext-latest", action="store_true",
-                        help="only fetch full text for items published today")
-    parser.add_argument("--download-images", action="store_true",
-                        help="download telegram post images locally (first N per post)")
+    parser.add_argument("--fulltext", default=FULLTEXT_DEFAULT,
+                        help=f"full-text policy: {' | '.join(FULLTEXT_MODES)} | <N>. "
+                             "Default 'today' fetches full text only for items published today")
+    parser.add_argument("--no-ai-input", action="store_true",
+                        help="skip writing the stage 2 input files")
+    parser.add_argument("--no-images", action="store_true",
+                        help="do not download telegram post images (images are on by default)")
     parser.add_argument("--images-per-post", type=int, default=2)
     parser.add_argument("--image-cap", type=int, default=200)
     parser.add_argument("--dates", action="store_true")
@@ -1059,40 +1085,43 @@ def main() -> int:
     if not args.source and not args.all:
         parser.error("choose a source, or pass --all")
 
+    today = datetime.now(CST).date()
     targets = ORDER if args.all else [args.source]
     results: dict[str, list[dict]] = {}
+    statuses: dict[str, dict] = {}
     failures: dict[str, str] = {}
 
     for name in targets:
         print(f"→ {name}", file=sys.stderr)
         started = time.time()
         try:
-            kwargs: dict = {}
-            if name == "linuxdo" and args.date:
-                kwargs["date"] = args.date
+            kwargs: dict = {"fulltext": args.fulltext}
+            if name == "linuxdo":
+                kwargs.pop("fulltext")
+                if args.date:
+                    kwargs["date"] = args.date
             if name == "telegram":
-                kwargs["day"] = args.day
-                kwargs["pages"] = args.pages
-            if name in ("ruanyifeng", "anywayfm") and args.no_fulltext_latest:
-                kwargs["fulltext_latest"] = False
+                kwargs = {"day": args.day, "pages": args.pages}
             items = SOURCES[name][0](args.limit if args.limit is not None else SOURCES[name][1], **kwargs)
             for entry in items:
                 stamp_now(entry)
+            mark_today(items, today)
+
             if name == "telegram":
                 items, groups = dedupe(items)
-                results["telegram_duplicates"] = []
-                (args.outdir).mkdir(parents=True, exist_ok=True)
-                if args.download_images:
+                args.outdir.mkdir(parents=True, exist_ok=True)
+                if not args.no_images:
                     saved = download_telegram_images(
                         items, Path("data/telegram/media"), args.images_per_post, args.image_cap)
                     print(f"  telegram images saved: {saved}", file=sys.stderr)
-                (args.outdir / "telegram_ai_queue.json").write_text(
-                    json.dumps(build_ai_queue(items), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 (args.outdir / "telegram_duplicate_groups.json").write_text(
                     json.dumps({"generated_at": datetime.now(CST).isoformat(), "groups": groups},
                                ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
             results[name] = items
-            print(f"  {len(items)} items in {time.time() - started:.1f}s", file=sys.stderr)
+            statuses[name] = source_status(items, today)
+            fresh = "today" if statuses[name]["updated_today"] else f"{statuses[name]['staleness_days']}d ago"
+            print(f"  {len(items)} items in {time.time() - started:.1f}s  (latest: {fresh})", file=sys.stderr)
         except Exception as exc:  # noqa: BLE001
             failures[name] = f"{type(exc).__name__}: {exc}"
             print(f"  FAILED: {failures[name]}", file=sys.stderr)
@@ -1101,7 +1130,9 @@ def main() -> int:
         for name in targets:
             if name not in results:
                 continue
-            print(f"\n=== {name} ({len(results[name])}) ===")
+            status = statuses.get(name, {})
+            flag = "UPDATED" if status.get("updated_today") else f"{status.get('staleness_days')}d"
+            print(f"\n=== {name} ({len(results[name])}) [{flag}] ===")
             for entry in results[name][:20]:
                 when = (entry.get("published_at") or "")[:16].replace("T", " ")
                 extra = entry.get("extra") or {}
@@ -1124,7 +1155,7 @@ def main() -> int:
         return 0
 
     args.outdir.mkdir(parents=True, exist_ok=True)
-    index = {"collected_at": datetime.now(CST).isoformat(), "sources": {}}
+    index = {"collected_at": datetime.now(CST).isoformat(), "day": today.isoformat(), "sources": {}}
     for name in targets:
         if name not in results:
             continue
@@ -1133,9 +1164,11 @@ def main() -> int:
             "source": name,
             "collected_at": datetime.now(CST).isoformat(),
             "count": len(results[name]),
+            "status": statuses.get(name, {}),
             "items": results[name],
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        index["sources"][name] = {"file": path.name, "count": len(results[name]), "ok": True}
+        index["sources"][name] = {"file": path.name, "count": len(results[name]), "ok": True,
+                                  **statuses.get(name, {})}
         print(f"  wrote {path}", file=sys.stderr)
 
     for name, err in failures.items():
@@ -1143,6 +1176,25 @@ def main() -> int:
 
     (args.outdir / "index.json").write_text(
         json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    if not args.no_ai_input and results:
+        args.aidir.mkdir(parents=True, exist_ok=True)
+        if "telegram" in results:
+            tg_input = ai_stage.build_telegram_input(results["telegram"], today.isoformat())
+            (args.aidir / "telegram_input.json").write_text(
+                json.dumps(tg_input, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            print(f"  wrote {args.aidir / 'telegram_input.json'} "
+                  f"({tg_input['item_count']} items)", file=sys.stderr)
+        print("  stage 2b input (digest_input.json) is written by tools/ai_apply.py "
+              "after the telegram merge", file=sys.stderr)
+
+    fresh = [n for n in targets if statuses.get(n, {}).get("updated_today")]
+    stale = [n for n in targets if n in statuses and not statuses[n].get("updated_today")]
+    print(f"\nday {today.isoformat()}: {len(fresh)} source(s) updated today, {len(stale)} stale",
+          file=sys.stderr)
+    if stale:
+        print("  stale: " + ", ".join(f"{n}({statuses[n]['staleness_days']}d)" for n in stale),
+              file=sys.stderr)
     print(args.outdir / "index.json")
     return 0
 

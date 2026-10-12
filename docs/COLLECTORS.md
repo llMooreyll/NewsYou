@@ -183,7 +183,8 @@ Each file:
 ## Rendering
 
 ```bash
-python tools/render_digest.py --indir data/collected --output site/digest.html
+python tools/ai_apply.py
+python tools/render_digest.py --indir data/processed --output site/digest.html
 ```
 
 Produces one styled page: a nav bar per source, 派早报 rendered as a feature card with its nested news items, ranked lists for the hot-search boards, and score/comment metadata for Hacker News.
@@ -261,7 +262,7 @@ works and carries 30 items with `pubDate`. Titles and descriptions are wrapped i
 Seven channels, one day, all messages:
 
 ```bash
-python tools/collect.py telegram --day auto --pages 4 --download-images
+python tools/collect.py telegram --day auto --pages 4
 ```
 
 - `--day auto` selects the newest day present across the fetched window; at
@@ -269,11 +270,55 @@ python tools/collect.py telegram --day auto --pages 4 --download-images
 - `--day today | yesterday | YYYY-MM-DD` pins it explicitly.
 - Pagination walks `?before=<lowest id>` until the target day boundary, so a
   busy channel is captured completely rather than truncated at 20 posts.
-- `--download-images` stores up to `--images-per-post` photos per message under
+- images are downloaded by default (`--no-images` disables); up to `--images-per-post` photos per message are stored under
   `data/telegram/media/<channel>/<message_id>/`, and the renderer prefers those
   local files over live CDN URLs.
 
 Pre-dedupe collapses byte-identical reposts and writes
 `telegram_duplicate_groups.json`. On a real day it finds **zero** groups, because
 channels never repeat each other verbatim — hence the reserved semantic pass in
-[`AI-REVIEW.md`](AI-REVIEW.md).
+[`docs/USAGE.md`](../docs/USAGE.md).
+
+---
+
+## Full-text policy
+
+Every full-text-capable source accepts the same `--fulltext` policy, applied by
+`fulltext_targets()` in `tools/collect.py`:
+
+| Mode | Behaviour |
+|---|---|
+| `today` (default) | only items published on the current CST day |
+| `latest` | today's items plus the newest one |
+| `all` | every eligible item |
+| `none` | no full text |
+| `<N>` | the newest N eligible items, ignoring dates |
+
+The policy is applied to the **eligible subset**, not to all items — otherwise
+`latest` on 少数派 would target a 派评 article instead of 派早报.
+
+```bash
+python tools/collect.py --all                          # default: today only
+python tools/collect.py --all --fulltext latest
+python tools/collect.py sspai --fulltext all
+```
+
+## Freshness tracking
+
+`source_status()` computes, per source:
+
+```json
+{"day": "2026-10-13", "updated_today": false, "latest_published_at": "…",
+ "staleness_days": 1, "count": 20, "fulltext_fetched": 0}
+```
+
+This is written into both `<source>.json` (`status`) and `index.json`, and the
+renderer turns it into a `今日已更新` / `今日未更新 · 最新 N 天前` badge. The CLI
+prints a summary line at the end of every run.
+
+## Stage 2 handoff
+
+`collect.py` writes `data/ai/telegram_input.json` (stage 2a). The stage 2b input
+is written by `tools/ai_apply.py` **after** the telegram merge, so that the
+briefing step sees merged rather than raw messages. See
+[`USAGE.md`](USAGE.md).
