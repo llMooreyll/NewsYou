@@ -6,123 +6,168 @@
 <title>Personal Newsletter System</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#000;--fg:#e8e8e8;--dim:#8a8a8a;--dimmer:#5c5c5c;--accent:#ff2f2f;--line:#1a1a1a;--panel:#080808}
-html{background:var(--bg)}
-body{background:var(--bg);color:var(--fg);
-  font:15px/1.7 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
-a{color:var(--fg);text-decoration:none;border-bottom:1px solid transparent}
-a:hover{color:var(--accent);border-bottom-color:var(--accent)}
-code,.mono,time{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-.wrap{width:min(1100px,100% - 32px);margin:0 auto}
-header{border-bottom:1px solid var(--line);padding:64px 0 40px}
-.kicker{color:var(--accent);font-size:11px;letter-spacing:.22em;text-transform:uppercase;font-family:ui-monospace,monospace}
-h1{font-size:clamp(2rem,6vw,4rem);line-height:1.02;letter-spacing:-.03em;margin:18px 0 20px;font-weight:800}
+:root{
+  --bg:#faf8f5;--surface:#fff;--ink:#1b1b1d;--ink-soft:#33333a;--muted:#6d6d76;
+  --faint:#a0a0a8;--line:#e7e3dc;--accent:#c0402c;--accent-soft:#fbeeea;--accent-ink:#8f2c1c;
+  --shadow:0 1px 2px rgba(28,24,20,.04),0 8px 24px -16px rgba(28,24,20,.18);
+}
+html{-webkit-text-size-adjust:100%}
+body{background:var(--bg);color:var(--ink);
+  font:16px/1.78 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none;transition:color .16s ease}
+a:hover{color:var(--accent)}
+code,.mono,time{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+::selection{background:var(--accent-soft)}
+.wrap{max-width:960px;margin:0 auto;padding:0 24px}
+header{padding:76px 0 46px;border-bottom:2px solid var(--ink)}
+.kicker{font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--accent);
+  font-family:ui-monospace,monospace;margin-bottom:20px}
+h1{font-size:clamp(30px,6vw,54px);line-height:1.08;letter-spacing:-.035em;font-weight:800;margin-bottom:22px}
 h1 em{font-style:normal;color:var(--accent)}
-.lede{color:var(--dim);max-width:70ch;font-size:16px}
-.tags{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}
-.tag{border:1px solid var(--line);color:var(--dim);font-size:11px;padding:3px 9px;font-family:ui-monospace,monospace}
-section{padding:46px 0;border-bottom:1px solid var(--line)}
-h2{font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);
-  font-family:ui-monospace,monospace;font-weight:700;margin-bottom:22px}
-h3{font-size:16px;font-weight:700;margin-bottom:6px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1px;background:var(--line)}
-.card{background:var(--panel);padding:20px}
-.card p{color:var(--dim);font-size:13.5px}
-.card .n{color:var(--accent);font-size:11px;font-family:ui-monospace,monospace;margin-bottom:10px;display:block}
+.lede{color:var(--muted);max-width:66ch;font-size:16.5px}
+.tags{display:flex;flex-wrap:wrap;gap:8px;margin-top:28px}
+.tag{font-size:11px;border:1px solid var(--line);color:var(--muted);padding:3px 9px;font-family:ui-monospace,monospace}
+section{padding:52px 0;border-bottom:1px solid var(--line)}
+h2{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);
+  font-family:ui-monospace,monospace;margin-bottom:26px;font-weight:700}
+h3{font-size:16px;font-weight:700;margin-bottom:7px;letter-spacing:-.01em}
+p{color:var(--muted);font-size:14.5px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1px;background:var(--line)}
+.card{background:var(--surface);padding:24px;transition:transform .2s cubic-bezier(.2,.7,.3,1),box-shadow .2s ease}
+.card:hover{transform:translateY(-2px);box-shadow:var(--shadow);position:relative;z-index:1}
+.card .n{display:block;font-size:10.5px;letter-spacing:.12em;color:var(--accent);
+  font-family:ui-monospace,monospace;margin-bottom:12px}
+.stages{display:flex;flex-direction:column;gap:1px;background:var(--line)}
+.stage{background:var(--surface);padding:22px 24px;display:flex;gap:22px;align-items:flex-start}
+.stage-n{font-family:ui-monospace,monospace;font-size:11px;color:var(--accent);min-width:64px;padding-top:3px}
+.stage-body{flex:1}
+.stage-body code{font-size:12.5px;color:var(--accent-ink);background:var(--accent-soft);padding:1px 6px}
+.stage-auto{font-size:10.5px;font-family:ui-monospace,monospace;color:var(--faint);
+  border:1px solid var(--line);padding:1px 7px;white-space:nowrap}
 table{width:100%;border-collapse:collapse;font-size:14px}
-th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--accent);font-size:11px;letter-spacing:.1em;text-transform:uppercase;font-family:ui-monospace,monospace;font-weight:700}
-td.mono{font-family:ui-monospace,monospace;color:var(--dim);font-size:12.5px}
-.ok{color:var(--fg)}.warn{color:var(--dim)}.bad{color:var(--dimmer)}
-pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto;
-  color:#c9c9c9;font-size:12.5px;font-family:ui-monospace,monospace}
-footer{padding:36px 0 80px;color:var(--dimmer);font-size:12px}
-footer code{color:var(--dim)}
-@media(max-width:640px){.wrap{width:calc(100% - 24px)}header{padding-top:44px}}
+th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);
+  font-family:ui-monospace,monospace;font-weight:700;border-bottom:1px solid var(--ink)}
+td.mono{font-family:ui-monospace,monospace;color:var(--muted);font-size:12.5px}
+tr:last-child td{border-bottom:0}
+pre{background:var(--surface);border:1px solid var(--line);padding:18px;overflow-x:auto;
+  color:var(--ink-soft);font-size:12.5px;font-family:ui-monospace,monospace;line-height:1.85}
+footer{padding:38px 0 90px;color:var(--faint);font-size:12.5px;line-height:1.9}
+footer code{color:var(--muted)}
+@media(max-width:640px){.wrap{padding:0 16px}header{padding-top:52px}.stage{flex-direction:column;gap:10px}}
 </style>
 </head>
 <body>
 <header><div class="wrap">
   <div class="kicker">Personal content intelligence</div>
   <h1>Less noise.<br><em>More signal.</em></h1>
-  <p class="lede">A local-first newsletter pipeline for technology, film, and society. It collects ten sources with plain HTTP, preserves a timestamp and original link for every item, and renders one reviewable digest.</p>
+  <p class="lede">A local-first, three-stage newsletter pipeline for technology, film, and society. Ten sources collected with plain HTTP, an optional AI pass that returns auditable decisions, and a single self-contained HTML file for reading and sharing.</p>
   <div class="tags">
     <span class="tag">10 sources</span>
     <span class="tag">stdlib only</span>
-    <span class="tag">no search tools</span>
-    <span class="tag">中文 + English</span>
-    <span class="tag">evidence first</span>
+    <span class="tag">single-file HTML</span>
+    <span class="tag">timestamps everywhere</span>
+    <span class="tag">AI decisions, not edits</span>
   </div>
 </div></header>
 
 <main>
-  <section><div class="wrap"><h2>Generated output</h2>
+  <section><div class="wrap"><h2>Read the output</h2>
     <div class="grid">
       <div class="card">
-        <span class="n">01 / main artifact</span>
+        <span class="n">MAIN ARTIFACT</span>
         <h3><a href="digest.html">每日摘要 →</a></h3>
-        <p>Tabbed digest: 少数派派早报全文、Telegram 当日瀑布流、linux.do 六板块、晚点、极客公园、阮一峰、Anyway.Now、Hacker News、微博与知乎热榜。Sticky nav, black/red, keyboard 1–9.</p>
+        <p>One self-contained HTML file: a ranked 今日汇总 briefing, a Telegram masonry wall with AI-merge disclosures, linux.do's six sections, and seven more sources. All CSS, JS, and images inlined.</p>
       </div>
       <div class="card">
-        <span class="n">02 / telegram</span>
-        <h3><a href="digest.html#telegram">当日消息 · 瀑布流</a></h3>
-        <p>Seven channels for one day: @MaiTungNews @tnews365 @zaihuapd @xhqcankao @GodlyNews1 @NewlearnerChannel @DNSPODT. Masonry cards, local images, reactions.</p>
+        <span class="n">DELIVERY DOC</span>
+        <h3><a href="../docs/USAGE.md">使用文档 →</a></h3>
+        <p>Architecture, the three stages, time rules, the full-text policy, how the AI decisions work, and how to add a source.</p>
       </div>
       <div class="card">
-        <span class="n">03 / evidence</span>
-        <h3><a href="captures/wechat-article-zk0KxuLzhmMJ4LPYW_OHMA.html">WeChat capture report</a></h3>
-        <p>The requested article hit an environment-verification wall. The report records the final URL, detection reason, and raw JSON — a failure captured honestly rather than hidden.</p>
-      </div>
-      <div class="card">
-        <span class="n">04 / data</span>
-        <h3><a href="../data/collected/index.json">Raw JSON</a></h3>
-        <p>One file per source plus <code>index.json</code>, <code>telegram_ai_queue.json</code>, and <code>telegram_duplicate_groups.json</code>.</p>
+        <span class="n">DATA</span>
+        <h3><a href="../data/processed/index.json">Processed JSON →</a></h3>
+        <p>Per-source output with freshness status, plus <code>digest.json</code> for the briefing panel.</p>
       </div>
     </div>
   </div></section>
 
-  <section><div class="wrap"><h2>Pipeline</h2>
+  <section><div class="wrap"><h2>Three stages</h2>
+    <div class="stages">
+      <div class="stage">
+        <span class="stage-n">STAGE 1</span>
+        <div class="stage-body">
+          <h3>Collect &amp; aggregate</h3>
+          <p><code>tools/collect.py</code> → <code>data/collected/</code>. Ten source adapters, standard library only. Every item gets a timestamp, a <code>date_source</code> marker, and a freshness flag.</p>
+        </div>
+        <span class="stage-auto">automatic</span>
+      </div>
+      <div class="stage">
+        <span class="stage-n">STAGE 2</span>
+        <div class="stage-body">
+          <h3>Optional AI processing</h3>
+          <p><code>tools/ai_apply.py</code> → <code>data/processed/</code>. The model returns <em>decisions only</em> — drop, merge, rank — which this script validates and applies. Raw data is never touched, so any change is auditable and reversible.</p>
+        </div>
+        <span class="stage-auto">semi-automatic</span>
+      </div>
+      <div class="stage">
+        <span class="stage-n">STAGE 3</span>
+        <div class="stage-body">
+          <h3>Render to one file</h3>
+          <p><code>tools/render_digest.py</code> → <code>site/digest.html</code>. Deterministic, no network, images inlined as data URIs. Works with or without stage 2.</p>
+        </div>
+        <span class="stage-auto">automatic</span>
+      </div>
+    </div>
+  </div></section>
+
+  <section><div class="wrap"><h2>Why decisions, not edits</h2>
     <table>
-      <thead><tr><th>Stage</th><th>Tool</th><th>Output</th></tr></thead>
+      <thead><tr><th>Property</th><th>Decision model</th></tr></thead>
       <tbody>
-        <tr><td>Collect</td><td class="mono">tools/collect.py</td><td class="mono">data/collected/&lt;source&gt;.json</td></tr>
-        <tr><td>Pre-dedupe</td><td class="mono">tools/collect.py</td><td class="mono">telegram_duplicate_groups.json</td></tr>
-        <tr><td>AI review queue</td><td class="mono">tools/collect.py</td><td class="mono">telegram_ai_queue.json</td></tr>
-        <tr><td>Render</td><td class="mono">tools/render_digest.py</td><td class="mono">site/digest.html</td></tr>
-        <tr><td>Browser capture</td><td class="mono">tools/cdp_capture.py</td><td class="mono">data/browser-captures/</td></tr>
+        <tr><td>Auditable</td><td class="mono">each change is one inspectable record</td></tr>
+        <tr><td>Reversible</td><td class="mono">delete the decisions file, raw data intact</td></tr>
+        <tr><td>Idempotent</td><td class="mono">re-applying yields the same result</td></tr>
+        <tr><td>Safe</td><td class="mono">invalid ids and empty merges are rejected</td></tr>
+        <tr><td>Testable</td><td class="mono">the whole pipeline runs with no model at all</td></tr>
       </tbody>
     </table>
   </div></section>
 
   <section><div class="wrap"><h2>Sources</h2>
     <table>
-      <thead><tr><th>Source</th><th>Endpoint</th><th>Full text</th><th>Timestamp</th></tr></thead>
+      <thead><tr><th>Source</th><th>Items</th><th>Full text</th><th>Timestamp</th></tr></thead>
       <tbody>
-        <tr><td>少数派</td><td class="mono">/feed + /api/v1/articles</td><td>派早报全文</td><td class="mono">RSS / API</td></tr>
-        <tr><td>Telegram ×7</td><td class="mono">t.me/s/&lt;channel&gt;</td><td>—</td><td class="mono">post</td></tr>
-        <tr><td>linux.do 晚报</td><td class="mono">/issues/&lt;date&gt;/</td><td>—</td><td class="mono">issue date</td></tr>
-        <tr><td>晚点 LatePost</td><td class="mono">POST /site/index</td><td>最新 3 篇</td><td class="mono">article page</td></tr>
-        <tr><td>极客公园</td><td class="mono">/rss</td><td>最新 3 篇</td><td class="mono">RSS</td></tr>
-        <tr><td>阮一峰</td><td class="mono">/blog/atom.xml</td><td>最新一期</td><td class="mono">Atom</td></tr>
-        <tr><td>Anyway.Now</td><td class="mono">/now/</td><td>最新一期</td><td class="mono">page</td></tr>
-        <tr><td>Hacker News</td><td class="mono">firebaseio.com/v0</td><td>—</td><td class="mono">API</td></tr>
-        <tr><td>微博热搜</td><td class="mono">/ajax/side/hotSearch</td><td>—</td><td class="mono">capture time</td></tr>
-        <tr><td>知乎热榜</td><td class="mono">api.zhihu.com/topstory</td><td>—</td><td class="mono">API</td></tr>
+        <tr><td>少数派</td><td class="mono">20</td><td>派早报全文</td><td class="mono">RSS / API</td></tr>
+        <tr><td>Telegram ×7</td><td class="mono">43</td><td>—</td><td class="mono">post</td></tr>
+        <tr><td>linux.do 晚报</td><td class="mono">72</td><td>—</td><td class="mono">issue date</td></tr>
+        <tr><td>晚点 LatePost</td><td class="mono">15</td><td>支持全文</td><td class="mono">article page</td></tr>
+        <tr><td>极客公园</td><td class="mono">15</td><td>支持全文</td><td class="mono">RSS</td></tr>
+        <tr><td>阮一峰</td><td class="mono">10</td><td>支持全文</td><td class="mono">Atom</td></tr>
+        <tr><td>Anyway.Now</td><td class="mono">10</td><td>支持全文</td><td class="mono">page</td></tr>
+        <tr><td>Hacker News</td><td class="mono">15</td><td>—</td><td class="mono">API</td></tr>
+        <tr><td>微博热搜</td><td class="mono">15</td><td>—</td><td class="mono">capture time</td></tr>
+        <tr><td>知乎热榜</td><td class="mono">15</td><td>—</td><td class="mono">API</td></tr>
       </tbody>
     </table>
   </div></section>
 
   <section><div class="wrap"><h2>Run it</h2>
-<pre>python tools/collect.py --all --download-images --outdir data/collected
-python tools/render_digest.py --indir data/collected --output site/digest.html</pre>
-    <p class="lede" style="margin-top:16px">Standard library only. No installs, no search tools, no system changes.</p>
+<pre>python tools/collect.py --all --outdir data/collected
+python tools/ai_apply.py
+python tools/render_digest.py --indir data/processed --output site/digest.html</pre>
+    <p style="margin-top:18px">Standard library only. No installs, no search tools, no system changes, no network calls in the render step.</p>
   </div></section>
 </main>
 
 <footer><div class="wrap">
-  Read <a href="../README.md">README.md</a>, <a href="../docs/COLLECTORS.md">collectors</a>,
-  <a href="../docs/AI-REVIEW.md">AI review step</a>, and <a href="../docs/ARCHITECTURE.md">architecture</a>.
-  Every item keeps its original link and timestamp; summaries are excerpts, not generated text.
+  <a href="../README.md">README.md</a> ·
+  <a href="../docs/USAGE.md">使用文档</a> ·
+  <a href="../docs/COLLECTORS.md">collectors</a> ·
+  <a href="../docs/ARCHITECTURE.md">architecture</a><br>
+  Every item keeps its original link and timestamp. Summaries are excerpts, not generated text.
+  Items marked <em>AI 合并</em> can be expanded to verify the original messages.
 </div></footer>
 </body>
 </html>

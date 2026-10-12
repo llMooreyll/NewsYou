@@ -7,7 +7,7 @@ This repository is the design starting point for a personal newsletter that coll
 The pipeline is **working end to end**: ten sources collect with plain HTTP, every item carries a timestamp and its original link, and one command renders a reviewable digest.
 
 ```bash
-python tools/collect.py --all --download-images --outdir data/collected
+python tools/collect.py --all --outdir data/collected
 python tools/render_digest.py --indir data/collected --output site/digest.html
 ```
 
@@ -17,7 +17,7 @@ Read the documents in this order:
 
 1. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the end-to-end method.
 2. [`docs/COLLECTORS.md`](docs/COLLECTORS.md) — every source, endpoint, and parsing decision.
-3. [`docs/AI-REVIEW.md`](docs/AI-REVIEW.md) — the reserved AI dedupe/rank step.
+3. [`docs/USAGE.md`](docs/USAGE.md) — 使用文档: the three stages, time rules, full-text policy, and how to extend.
 4. [`docs/RESEARCH.md`](docs/RESEARCH.md) — online research, reference projects, and decisions.
 5. [`docs/WECHAT.md`](docs/WECHAT.md) — how to get all current and future articles from one WeChat account.
 6. [`docs/TELEGRAM.md`](docs/TELEGRAM.md) — Telegram channel collection plus a Telethon implementation guide.
@@ -62,7 +62,7 @@ Research captures are stored in [`data/browser-captures/`](data/browser-captures
 
 ```bash
 python tools/collect.py --list-sources
-python tools/collect.py --all --download-images --outdir data/collected
+python tools/collect.py --all --outdir data/collected
 python tools/collect.py sspai --limit 20
 python tools/collect.py telegram --day 2026-10-12 --pages 4
 python tools/collect.py --dates          # linuxdo issue dates, auto-discovered
@@ -97,7 +97,7 @@ Seven channels for the target day, in one panel:
 @GodlyNews1  @NewlearnerChannel  @DNSPODT
 ```
 
-No `api_id`, no login, no bot — the public `t.me/s/` preview, paged backwards with `?before=<message id>`. `--day auto` picks the newest day present. Images can be saved locally with `--download-images` so the page never depends on a live CDN.
+No `api_id`, no login, no bot — the public `t.me/s/` preview, paged backwards with `?before=<message id>`. `--day auto` picks the newest day present. Post images are downloaded by default (`--no-images` disables) so the page never depends on a live CDN.
 
 ### Rendering
 
@@ -115,7 +115,15 @@ Seven channels repost the same events in different words, so hash equality finds
 60 messages · exact-duplicate groups: 0
 ```
 
-`tools/collect.py` therefore emits `telegram_ai_queue.json` — a local file containing the messages plus the model instructions and expected response schema — for a semantic dedupe/rank pass. Nothing is sent anywhere automatically. See [`docs/AI-REVIEW.md`](docs/AI-REVIEW.md).
+The model returns **decisions only** — `drop`, `merge`, `rank` — which [`tools/ai_apply.py`](tools/ai_apply.py) validates and applies. Raw data in `data/collected/` is never modified, so every change is auditable and reversible.
+
+```bash
+python tools/ai_apply.py              # apply whatever decision files exist
+python tools/ai_apply.py --dry-run    # validate only
+python tools/ai_apply.py --report     # show what was applied and rejected
+```
+
+Prompts live in [`prompts/telegram_merge.md`](prompts/telegram_merge.md) and [`prompts/digest_highlights.md`](prompts/digest_highlights.md), and are embedded into the generated input files so they cannot be lost. Nothing is sent anywhere automatically. See [`docs/USAGE.md`](docs/USAGE.md).
 
 See [`docs/COLLECTORS.md`](docs/COLLECTORS.md) for the full endpoint and parsing reference.
 
