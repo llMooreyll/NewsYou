@@ -80,8 +80,9 @@ def main() -> int:
     parser.add_argument("--outdir", type=Path, default=Path("data/collected"))
     parser.add_argument("--aidir", type=Path, default=Path("data/ai"),
                         help="where stage 2 input files are written")
-    parser.add_argument("--engine", default="legacy", choices=ex.ENGINES,
-                        help="extraction engine: legacy (stdlib) or modern (trafilatura/feedparser)")
+    parser.add_argument("--engine", default=ex.DEFAULT_ENGINE, choices=ex.ENGINES,
+                        help="extraction engine: modern (trafilatura/feedparser, default) "
+                             "or legacy (standard library only)")
     parser.add_argument("--date", default=None, help="linuxdo issue date")
     parser.add_argument("--day", default="auto", help="telegram day: today | yesterday | auto | YYYY-MM-DD")
     parser.add_argument("--pages", type=int, default=4, help="telegram pages per channel")
@@ -103,6 +104,10 @@ def main() -> int:
     if not ok:
         print(f"error: {reason}", file=sys.stderr)
         return 2
+    engine, warning = ex.resolve_engine(args.engine)
+    if warning:
+        print(f"warning: {warning}", file=sys.stderr)
+    args.engine = engine
 
     if args.list_sources:
         for name in registry.ORDER:

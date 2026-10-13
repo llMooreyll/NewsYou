@@ -44,8 +44,10 @@ SOURCE_LABELS = {
     "zhihu": "知乎热榜",
 }
 
-# Sources whose `collect` accepts a fulltext policy. The rest have no body.
-FULLTEXT_SOURCES = {"ruanyifeng", "anywayfm", "sspai", "latepost", "geekpark"}
+# Sources whose `collect` accepts a fulltext policy.
+# anywayfm is absent on purpose: /now/ is a list of recommended links and its
+# "full text" would be a third-party article reached via a 301 redirect.
+FULLTEXT_SOURCES = {"ruanyifeng", "sspai", "latepost", "geekpark"}
 
 def get(name: str):
     return SOURCES[name][0]

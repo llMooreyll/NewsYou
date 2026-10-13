@@ -1,14 +1,44 @@
-# Optional "modern" extraction engine (tools/extract.py, engine=modern).
+# Dependencies for the newsletter pipeline.
 #
-# The collector defaults to the standard-library "legacy" engine, which needs
-# nothing installed. These packages are only imported when you select the
-# modern engine, so a legacy-only checkout still runs on a bare Python.
+# The pipeline has two interchangeable extraction engines (see
+# tools/collectors/extract.py):
+#
+#   modern (default)  trafilatura + feedparser — one code path for every site,
+#                     keeps inline links and headings. Needs this file.
+#   legacy            standard library only, no install required. Selected with
+#                     --engine legacy, or automatically if these packages are
+#                     missing.
+#
+# Setup (a virtualenv keeps the system Python untouched):
 #
 #   python3 -m venv .venv
 #   ./.venv/bin/pip install -r requirements.txt
-#   ./.venv/bin/python tools/collect.py --all --engine modern
+#   ./.venv/bin/python tools/collect.py --all
 #
-# trafilatura  general article/body extraction (own rules + readability + jusText fallbacks)
-# feedparser   RSS/Atom feed parsing (replaces the hand-rolled CDATA regexes)
-trafilatura==2.3.1
-feedparser==6.0.14
+# The versions below are the exact closure the project is developed and tested
+# against, pinned so a fresh clone reproduces the same output. Regenerate with:
+#
+#   ./.venv/bin/pip freeze
+
+# --- direct dependencies ---------------------------------------------------
+trafilatura==2.3.1      # article/body extraction (own rules + readability + jusText)
+feedparser==6.0.14      # RSS/Atom feed parsing
+
+# --- transitive dependencies (pinned for reproducibility) -------------------
+babel==2.18.0
+certifi==2026.7.22
+charset-normalizer==3.5.2
+courlan==1.4.0
+dateparser==1.4.3
+feedparser-sgmllib==2.1.0
+htmldate==1.11.0
+jusText==3.0.2
+lxml==6.1.3
+lxml_html_clean==0.4.5
+python-dateutil==2.9.0.post0
+pytz==2026.5
+regex==2026.9.29
+six==1.17.0
+tld==0.13.2
+tzlocal==5.4.4
+urllib3==2.8.0

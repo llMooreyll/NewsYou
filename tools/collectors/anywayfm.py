@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 """Anyway.Now (anyway.fm).
 
-The /now/ page is a list of link items; each has a title link, a description and
-a relative date stored in a data-balloon attribute. Only some entries get full
-text, driven by the full-text policy.
+The /now/ page is a list of *recommended links*, not articles. Each entry has a
+title link, an editor's description (``news-desc``) and a relative date in a
+data-balloon attribute.
+
+No full text is fetched, deliberately:
+
+- ``/links/<id>`` is a 301 redirector that lands on a third-party site, so any
+  "full text" would be someone else's article, not Anyway's.
+- The only original content Anyway publishes here is the description, which is
+  already stored as ``summary``.
+
+So this source is title + description + link, and the full-text policy does not
+apply to it.
 """
 from __future__ import annotations
 
 import re
-import sys
-import time
 
 from . import base
-from . import extract as ex
-from .base import FetchError
 
 SOURCE = "anywayfm"
 NAME = "Anyway.Now 安妮薇看看"
 
 NOW_URL = "https://anyway.fm/now/"
-LEGACY_MARKER = 'class="note-content"'
 
-def collect(limit: int = 10, fulltext=base.FULLTEXT_DEFAULT, engine: str = "legacy", **_):
+def collect(limit: int = 10, **_):
     page = base.fetch(NOW_URL)
     items: list[dict] = []
     # split on the item boundary so each block is self-contained
@@ -48,22 +53,4 @@ def collect(limit: int = 10, fulltext=base.FULLTEXT_DEFAULT, engine: str = "lega
         ))
         if len(items) >= limit:
             break
-
-    _fetch_bodies(items, engine=engine, fulltext=fulltext)
     return items
-
-def _fetch_bodies(items: list[dict], *, engine: str, fulltext) -> None:
-    for entry in base.fulltext_targets(items, fulltext):
-        scope = base.fulltext_scope_label(entry)
-        try:
-            detail = base.fetch(entry["url"])
-        except FetchError as exc:
-            print(f"  ! body failed {entry['url']}: {exc}", file=sys.stderr)
-            continue
-        body = ex.extract_article(detail, entry["url"], engine, legacy_marker=LEGACY_MARKER)
-        if body:
-            base.write_body(entry, body, engine=engine, scope=scope)
-            heading = re.search(r"<h1[^>]*>(.*?)</h1>", detail, re.S)
-            if heading:
-                entry["extra"]["original_title"] = base.strip_tags(heading.group(1))
-        time.sleep(0.4)

@@ -32,6 +32,7 @@ from . import base
 from .base import FetchError, balanced_div, strip_tags  # noqa: F401  (re-export)
 
 ENGINES = ("legacy", "modern")
+DEFAULT_ENGINE = "modern"
 
 def engine_available(engine: str) -> tuple[bool, str]:
     """Return (ok, reason). Checked before a run so failures are clear."""
@@ -47,6 +48,22 @@ def engine_available(engine: str) -> tuple[bool, str]:
         return False, (f"engine 'modern' needs {', '.join(missing)}. "
                        "Install with: ./.venv/bin/pip install -r requirements.txt")
     return True, ""
+
+def resolve_engine(requested: str, *, allow_fallback: bool = True) -> tuple[str, str]:
+    """Return (engine to use, warning).
+
+    The default engine is `modern`, but a bare checkout without the optional
+    dependencies must still run. Rather than fail, fall back to `legacy` with a
+    loud warning, and record which engine actually ran in the output index.
+    """
+    ok, reason = engine_available(requested)
+    if ok:
+        return requested, ""
+    if allow_fallback and requested == DEFAULT_ENGINE:
+        return "legacy", (f"{reason}\n"
+                          f"  falling back to --engine legacy for this run. "
+                          f"Results will differ from a modern run.")
+    return requested, reason
 
 def _import_modern():
     import trafilatura
