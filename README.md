@@ -1,6 +1,6 @@
-# 个人 Newsletter 聚合系统
+# NewsYou
 
-把中英文多信源的一天内容抓下来，可选地交给模型去重、筛选，最后渲染成**一个自包含的 HTML 文件**。
+个人 Newsletter 聚合系统：把中英文多信源的一天内容抓下来，可选地交给模型去重、筛选，最后渲染成**一个自包含的 HTML 文件**。
 
 - **10 个信源**：少数派、Telegram（7 个频道）、linux.do、晚点、极客公园、阮一峰、Anyway.Now、Hacker News、微博热搜、知乎热榜
 - **单文件产出**：图片内联 base64，**零外部请求**——断网、离线、直接发文件都能看
@@ -14,7 +14,7 @@
 ## 1. 安装
 
 ```bash
-git clone <repo> && cd test0
+git clone <repo> && cd NewsYou
 make setup          # 建 .venv 并装依赖（唯一需要网络的步骤）
 make check          # 验证依赖与两个引擎
 ```
@@ -604,7 +604,6 @@ tools/
   compare_engines.py      引擎差异报告
   run_ab.py               一键跑两引擎对比
   telegram_preview.py     Telegram 预览页的薄封装
-  cdp_capture.py          浏览器抓取工具（CDP）
 
 prompts/
   telegram_merge.md       阶段 2a 提示词
@@ -612,25 +611,5 @@ prompts/
 
 site/digest.html          产物（单文件，零外部请求）
 tests/                    离线回归测试
-docs/                     设计文档（历史资料）
 archive/                  每日快照（gitignore）
 ```
-
----
-
-## 11. 延伸阅读
-
-`docs/` 里是项目早期的调研与设计记录。**它们描述的是「为什么这么设计」，不一定与当前实现逐字一致**（例如实现早期用过 FastAPI/PostgreSQL 的设想，最终选择了更简单的三阶段脚本）。需要理解背景时再读：
-
-| 文档 | 内容 |
-|---|---|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 端到端方法 |
-| [`docs/COLLECTORS.md`](docs/COLLECTORS.md) | 每个信源的端点与解析决策 |
-| [`docs/CONTENT_MODEL.md`](docs/CONTENT_MODEL.md) | 数据契约与溯源模型 |
-| [`docs/TELEGRAM.md`](docs/TELEGRAM.md) / [`TELEGRAM-NO-API.md`](docs/TELEGRAM-NO-API.md) | Telegram 采集方案（含无 API 的五种途径） |
-| [`docs/SOURCE_MATRIX.md`](docs/SOURCE_MATRIX.md) | 各服务应如何抓取，含兜底与限制 |
-| [`docs/RSSHUB.md`](docs/RSSHUB.md) | RSSHub 能抓与不能抓的（实测覆盖率） |
-| [`docs/RESEARCH.md`](docs/RESEARCH.md) | 在线调研与参考项目 |
-| [`docs/ROADMAP.md`](docs/ROADMAP.md) | 分阶段实现计划 |
-
-**当前实现以本 README 与代码为准。**
