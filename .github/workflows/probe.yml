@@ -21,8 +21,8 @@ jobs:
           probe () {  # name url [extra curl args...]
             local name="$1" url="$2"; shift 2
             local out
-            out=$(curl -sS -o /dev/null -m 25 -w '%{http_code} %{time_total}s %{size_download}B' "$@" "$url" 2>&1)
-            printf '  %-12s %-46s %s\n' "$name" "$url" "$out"
+            out=$(curl -sS -o /dev/null -m 25 -w '%{http_code} %{time_total}s %{size_download}B' "$@" "$url" 2>&1) || true
+            printf '  %-12s %-44s %s\n' "$name" "${url:0:44}" "$out"
           }
           echo "=== probe (HTTP code / total time / bytes) ==="
           probe sspai-feed    https://sspai.com/feed
