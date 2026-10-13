@@ -47,7 +47,7 @@ def load_json(path: Path):
         return None
 
 
-def load_collected(indir: Path, day: str | None = None) -> tuple[dict[str, list[dict]], dict]:
+def load_collected(indir: Path, day: str | None = None) -> tuple[dict[str, list[dict]], dict, dict]:
     """Load the sources that belong to the run for `day`.
 
     data/collected/ outlives a run, and collect.py writes a file only for a
@@ -58,9 +58,13 @@ def load_collected(indir: Path, day: str | None = None) -> tuple[dict[str, list[
 
     Before, not merely different: a run that crosses midnight stamps its files
     one day after the index day, and those are this run's own.
+
+    Returns (results, statuses, skipped), where `skipped` maps a source name to
+    why it was left out.
     """
     results: dict[str, list[dict]] = {}
     statuses: dict[str, dict] = {}
+    skipped: dict[str, dict] = {}
     index = load_json(indir / "index.json") or {}
     for path in sorted(indir.glob("*.json")):
         if path.name in SKIP_FILES:
@@ -72,10 +76,42 @@ def load_collected(indir: Path, day: str | None = None) -> tuple[dict[str, list[
         if day and written and written < day:
             print(f"  ! {path.name} was collected on {written}, before {day}; "
                   f"skipped (did the source fail or get disabled today?)", file=sys.stderr)
+            skipped[path.stem] = {"reason": "stale", "detail": f"上次采集 {written}"}
             continue
         results[path.stem] = payload.get("items") or []
         statuses[path.stem] = payload.get("status") or index.get("sources", {}).get(path.stem, {})
-    return results, statuses
+    return results, statuses, skipped
+
+
+def missing_sources(collected: Path, cfg, processed: dict, skipped: dict) -> dict[str, dict]:
+    """Sources this run was meant to collect but has no fresh data for.
+
+    A failure used to show up only as a tab that quietly disappeared, because
+    the renderer draws whatever is in data/processed/ and nothing else. Recording
+    the absence lets the digest keep the tab and say what happened, and keeps the
+    header count honest — 7/10 sources updated, not 7/7.
+
+    A source that was switched off is not reported: it is not in the configured
+    set, so its silence is intended rather than a fault.
+    """
+    index = load_json(collected / "index.json") or {}
+    failed = {name: info for name, info in (index.get("sources") or {}).items()
+              if isinstance(info, dict) and info.get("ok") is False}
+    absent: dict[str, dict] = {}
+    for name in ai_stage.expected_sources(cfg):
+        if name in processed:
+            continue
+        entry = {"label": ai_stage.configured_label(name, cfg)}
+        if name in failed:
+            entry["reason"] = "failed"
+            entry["detail"] = str(failed[name].get("error") or "")
+        elif name in skipped:
+            entry["reason"] = skipped[name]["reason"]
+            entry["detail"] = skipped[name].get("detail", "")
+        else:
+            entry["reason"] = "missing"
+        absent[name] = entry
+    return absent
 
 
 def write_json(path: Path, payload) -> None:
@@ -190,7 +226,7 @@ def main() -> int:
     day = (load_json(args.collected / "index.json") or {}).get("day") \
         or datetime.now().astimezone().date().isoformat()
 
-    results, statuses = load_collected(args.collected, day)
+    results, statuses, skipped = load_collected(args.collected, day)
     if not results:
         print(f"no collected data in {args.collected}; run tools/collect.py first", file=sys.stderr)
         return 1
@@ -321,6 +357,10 @@ def main() -> int:
         print("digest: no decisions file, no briefing panel", file=sys.stderr)
 
     # ---------------- summary ----------------
+    absent = missing_sources(args.collected, cfg, processed, skipped)
+    if absent:
+        listed = ", ".join(f"{n} ({v['reason']})" for n, v in absent.items())
+        print(f"  no data today from: {listed}", file=sys.stderr)
     if not args.dry_run:
         write_json(args.out / "index.json", {
             "day": day,
@@ -329,6 +369,9 @@ def main() -> int:
                 name: {"count": len(items), "status": statuses.get(name, {})}
                 for name, items in processed.items()
             },
+            # Sources the digest should still show a tab for, with the reason
+            # there is nothing behind it.
+            "absent": absent,
             "stage2": {
                 "ai_backend": ai_backend,
                 "telegram": {k: v for k, v in report["telegram"].items() if k != "drop_details"},

@@ -73,6 +73,45 @@ def source_label(name: str, items: list[dict]) -> str:
     return next((e["source_name"] for e in items if e.get("source_name")), name)
 
 
+def expected_sources(cfg) -> list[str]:
+    """Every source this run was supposed to collect, in panel order.
+
+    Mirrors how collect.py builds its target list, so a source that never
+    arrived can be told apart from one that was switched off: the first is worth
+    reporting to the reader, the second is not. `[[feeds]]` entries are added by
+    hand because configure_feeds() registers them during collection, and stage 2
+    never runs it.
+    """
+    from collectors import registry
+
+    names = list(cfg.get("sources.order") or [])
+    for name in registry.SOURCES:
+        if name not in names:
+            names.append(name)
+    for feed in cfg.get("feeds") or []:
+        if feed.get("id") and feed["id"] not in names:
+            names.append(feed["id"])
+    enabled = cfg.get("sources.enabled") or []
+    if enabled:
+        wanted = set(enabled)
+        names = [name for name in names if name in wanted]
+    return names
+
+
+def configured_label(name: str, cfg=None) -> str:
+    """Display name for a source with no items to read it from.
+
+    `source_label` falls back to the name a collector stamped on its items,
+    which a source that produced nothing has none of. Configuration is the
+    remaining authority.
+    """
+    if cfg is not None:
+        label = (cfg.get("sources.labels") or {}).get(name)
+        if label:
+            return label
+    return SOURCE_LABELS.get(name, name)
+
+
 # --------------------------------------------------------------------------
 # Identity
 # --------------------------------------------------------------------------

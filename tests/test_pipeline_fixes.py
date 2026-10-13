@@ -344,6 +344,113 @@ class StageTwoRun(unittest.TestCase):
         self.assertEqual(sent["sources"]["my-blog"]["source_name"], "示例博客")
 
 
+class AbsentSources(unittest.TestCase):
+    """A source that produced nothing today must still be visible.
+
+    It used to vanish: the renderer drew whatever was in data/processed/ and
+    the header counted only what arrived, so a run where three sources broke
+    read as a complete run of seven.
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.cfg = mock.Mock()
+        self.cfg.get.side_effect = lambda key, default=None: {
+            "sources.order": ["sspai", "weibo", "zhihu"],
+            # enabled, not order, is what decides the expected set: order is only
+            # ordering, so a source missing from it still runs.
+            "sources.enabled": ["sspai", "weibo", "zhihu"],
+            "sources.labels": {"weibo": "微博热搜", "zhihu": "知乎热榜"},
+            "feeds": [],
+        }.get(key, default)
+        self.collected = self.root / "collected"
+        self.collected.mkdir()
+        self.write_index({"weibo": {"ok": False, "error": "connection reset"}})
+
+    def write_index(self, sources: dict) -> None:
+        (self.collected / "index.json").write_text(
+            json.dumps({"day": DAY, "sources": sources}), encoding="utf-8")
+
+    def absent(self, processed: dict, skipped: dict | None = None) -> dict:
+        return ai_apply.missing_sources(self.collected, self.cfg, processed,
+                                        skipped or {})
+
+    def test_a_failed_source_is_reported_with_its_error(self):
+        got = self.absent({"sspai": []})
+        self.assertEqual(sorted(got), ["weibo", "zhihu"])
+        self.assertEqual(got["weibo"]["reason"], "failed")
+        self.assertEqual(got["weibo"]["detail"], "connection reset")
+        self.assertEqual(got["weibo"]["label"], "微博热搜")
+
+    def test_a_source_with_no_record_is_reported_as_missing(self):
+        self.assertEqual(self.absent({"sspai": []})["zhihu"]["reason"], "missing")
+
+    def test_a_stale_skip_is_reported_as_such(self):
+        skipped = {"zhihu": {"reason": "stale", "detail": "上次采集 2026-10-12"}}
+        self.write_index({})
+        self.assertEqual(self.absent({"sspai": []}, skipped)["zhihu"]["reason"], "stale")
+
+    def test_a_source_with_data_is_never_reported(self):
+        self.assertNotIn("sspai", self.absent({"sspai": [], "weibo": [], "zhihu": []}))
+
+    def test_every_registered_source_is_expected_by_default(self):
+        """sources.order is ordering only; a source left out of it still runs."""
+        self.cfg.get.side_effect = lambda key, default=None: {
+            "sources.order": ["sspai"],
+            "sources.enabled": [],
+            "sources.labels": {},
+            "feeds": [],
+        }.get(key, default)
+        got = self.absent({"sspai": []})
+        self.assertIn("telegram", got)      # not in order, still expected
+        self.assertNotIn("sspai", got)
+
+    def test_a_disabled_source_is_not_reported(self):
+        """Silence from a source switched off on purpose is not a fault."""
+        self.cfg.get.side_effect = lambda key, default=None: {
+            "sources.order": ["sspai", "weibo", "zhihu"],
+            "sources.enabled": ["sspai"],
+            "sources.labels": {},
+            "feeds": [],
+        }.get(key, default)
+        self.assertEqual(self.absent({"sspai": []}), {})
+
+
+class AbsentPanelRendering(unittest.TestCase):
+    def test_a_failed_source_keeps_its_tab_and_explains_itself(self):
+        absent = {"weibo": {"label": "微博热搜", "reason": "failed",
+                            "detail": "connection reset"}}
+        html = render_digest.render({"sspai": {"items": [], "status": {}}}, None,
+                                    Path("/tmp/x.html"), False, absent)
+        self.assertIn('data-tab="weibo"', html)      # the tab survives
+        self.assertIn("抓取失败", html)
+        self.assertIn("connection reset", html)
+        self.assertIn("miss-tag", html)
+
+    def test_the_header_counts_the_sources_that_were_expected(self):
+        absent = {"weibo": {"label": "微博热搜", "reason": "failed"}}
+        html = render_digest.render(
+            {"sspai": {"items": [], "status": {"updated_today": True}}}, None,
+            Path("/tmp/x.html"), False, absent)
+        self.assertIn("1</b>/2 源今日更新", html)     # not 1/1
+        self.assertIn("1</b> 源未取得", html)
+
+    def test_a_stale_source_is_described_differently_from_a_failed_one(self):
+        absent = {"weibo": {"label": "微博热搜", "reason": "stale",
+                            "detail": "上次采集 2026-10-12"}}
+        html = render_digest.render({}, None, Path("/tmp/x.html"), False, absent)
+        self.assertIn("今日无新数据", html)
+        self.assertNotIn("抓取失败", html)
+
+    def test_without_absent_sources_nothing_changes(self):
+        html = render_digest.render({"sspai": {"items": [], "status": {}}}, None,
+                                    Path("/tmp/x.html"), False, {})
+        self.assertIn("0</b>/1 源今日更新", html)
+        self.assertNotIn("源未取得", html)
+
+
 class RendererReport(unittest.TestCase):
     def test_failed_and_empty_channels_show_in_the_rail(self):
         status = {"collector_report": {"channels": {

@@ -449,7 +449,9 @@ def image_tag(path: Path, embed: bool, out_dir: Path) -> str:
 def panel_head(title: str, sub: str, status: dict | None, extra_meta: str = "") -> str:
     meta = [extra_meta] if extra_meta else []
     if status:
-        if status.get("updated_today"):
+        if status.get("absent"):
+            meta.append('<span class="fresh-tag miss-tag">未采集</span>')
+        elif status.get("updated_today"):
             meta.append('<span class="fresh-tag ok">今日更新</span>')
         elif status.get("staleness_days") is not None:
             meta.append(f'<span class="fresh-tag">{esc(status["staleness_days"])} 天未更新</span>')
@@ -1075,20 +1077,55 @@ def _asset(name: str) -> str:
     return (ASSETS / name).read_text(encoding="utf-8")
 
 
-def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: bool) -> str:
+def absent_panel(info: dict) -> str:
+    """What a source's tab shows when this run produced nothing for it.
+
+    A failed source used to leave no trace in the page: its tab simply vanished,
+    and the header still counted only the sources that arrived, so a run where
+    three sources broke looked like a complete run of seven. Saying so is the
+    point — the reader should be able to tell "nothing was published" from
+    "we could not fetch it".
+    """
+    reason = info.get("reason") or "missing"
+    headline, hint = {
+        "failed": ("抓取失败", "本次未能取得数据，下方为空白而非旧内容"),
+        "stale": ("今日无新数据", "上一次采集早于今天，已跳过以免旧内容混入"),
+    }.get(reason, ("今日无数据", "本次未采集到该源的内容"))
+    detail = info.get("detail") or ""
+    return (
+        '<div class="absent">'
+        f'<p class="absent-h">{esc(headline)}</p>'
+        f'<p class="absent-s">{esc(hint)}</p>'
+        + (f'<p class="absent-d">{esc(detail)}</p>' if detail else "")
+        + "</div>"
+    )
+
+
+def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: bool,
+           absent: dict | None = None) -> str:
+    absent = absent or {}
     names = [n for n in ORDER if n in sources] + sorted(n for n in sources if n not in ORDER)
-    day = next((sources[n].get("day") for n in names if sources[n].get("day")), "") or \
+    # A source with no data still gets a tab, so its absence is visible rather
+    # than inferred from a count the reader cannot see.
+    for name in absent:
+        if name not in names:
+            names.append(name)
+    day = next((sources[n].get("day") for n in names
+                if n in sources and sources[n].get("day")), "") or \
         datetime.now(CST).date().isoformat()
     _CTX["day"] = str(day)[:10]
-    total = sum(len(sources[n].get("items") or []) for n in names)
-    updated = sum(1 for n in names if (sources[n].get("status") or {}).get("updated_today"))
+    total = sum(len(sources[n].get("items") or []) for n in names if n in sources)
+    updated = sum(1 for n in names if n in sources
+                  and (sources[n].get("status") or {}).get("updated_today"))
 
     tabs, panels = [], []
 
-    def add(key: str, label: str, count: int, fresh: bool, body: str):
+    def add(key: str, label: str, count, fresh: bool, body: str, broken: bool = False):
         tabs.append(f'<button class="tab" role="tab" type="button" id="t-{esc(key)}" data-tab="{esc(key)}" '
                     f'aria-controls="p-{esc(key)}" aria-selected="false" tabindex="-1">{esc(label)}'
-                    f'<span class="n">{count}</span>' + ('<span class="fresh" aria-hidden="true"></span>' if fresh else "")
+                    f'<span class="n">{count}</span>'
+                    + ('<span class="fresh" aria-hidden="true"></span>' if fresh else "")
+                    + ('<span class="miss" aria-hidden="true"></span>' if broken else "")
                     + "</button>")
         panels.append(f'<section class="panel" role="tabpanel" id="p-{esc(key)}" aria-labelledby="t-{esc(key)}">{body}</section>')
 
@@ -1099,6 +1136,13 @@ def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: b
             + render_digest_panel(digest))
 
     for name in names:
+        if name in absent and name not in sources:
+            info = absent[name]
+            add(name, info.get("label") or name, 0, False,
+                panel_head(PANEL_TITLE.get(name, info.get("label") or name),
+                           "本次未采集", {"absent": True}) + absent_panel(info),
+                broken=True)
+            continue
         payload = sources[name]
         items = payload.get("items") or []
         label, sub = SOURCE_META.get(name, (payload.get("source_name") or name, ""))
@@ -1135,6 +1179,8 @@ def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: b
     tab_html = tab_html.replace('<div class="scroller-track" aria-label="信源">',
                                 '<div class="scroller-track" role="tablist" aria-label="信源">')
     stats = f'<b>{total}</b> 条 · <b>{updated}</b>/{len(names)} 源今日更新'
+    if absent:
+        stats += f' · <b class="miss-n">{len(absent)}</b> 源未取得'
     return (PAGE
             .replace("__TITLE__", esc(f"Daily Brief · {fmt_day(day)}"))
             .replace("__CSS__", _asset("digest.css"))
@@ -1192,14 +1238,28 @@ def main() -> int:
         except json.JSONDecodeError:
             digest = None
 
+    # Sources stage 2 recorded as having produced nothing today. Kept so their
+    # tabs can say why instead of silently disappearing.
+    absent: dict[str, dict] = {}
+    index_path = indir / "index.json"
+    if index_path.exists():
+        try:
+            absent = (json.loads(index_path.read_text(encoding="utf-8")) or {}).get("absent") or {}
+        except json.JSONDecodeError:
+            absent = {}
+    # A source that produced data is present regardless of what the index says.
+    absent = {n: v for n, v in absent.items() if n not in sources}
+
     if not sources:
         print(f"no data in {indir}; run tools/collect.py first")
         return 1
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(render(sources, digest, args.output, not args.no_embed), encoding="utf-8")
+    args.output.write_text(render(sources, digest, args.output, not args.no_embed, absent),
+                           encoding="utf-8")
     size = args.output.stat().st_size / 1024
     print(f"{args.output}  ({size:.0f} KiB, {len(sources)} sources"
+          + (f", {len(absent)} absent" if absent else "")
           + (", digest panel" if digest and digest.get("cards") else "") + ")")
     return 0
 
