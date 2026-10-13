@@ -48,9 +48,10 @@ def _section_spans(page: str) -> list[tuple[str, str, str]]:
         end = opens[index + 1][1] if index + 1 < len(opens) else len(page)
         body = page[content_start:end]
         heading = ""
-        match = re.search(r"<h[12][^>]*>(.*?)</h\1>", body, re.S)
+        # the backreference must point at the heading level, not the text
+        match = re.search(r"<h([12])[^>]*>(.*?)</h\1>", body, re.S)
         if match:
-            heading = base.strip_tags(match.group(1))
+            heading = base.strip_tags(match.group(2))
         spans.append((section_id, heading, body))
     return spans
 

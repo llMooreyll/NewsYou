@@ -32,11 +32,31 @@ UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
 CST = timezone(timedelta(hours=8))
 UTC = timezone.utc
 
-# latepost serves an incomplete certificate chain, so strict verification fails
-# even though the certificate itself is valid and matches the hostname.
-RELAXED_TLS = ssl.create_default_context()
-RELAXED_TLS.check_hostname = False
-RELAXED_TLS.verify_mode = ssl.CERT_NONE
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# Extra trust for sites whose chain ends at a root that system stores do not
+# carry yet. latepost uses Let's Encrypt's "Generation Y" chain (leaf -> YR1 ->
+# Root YR); Root YR is not in most trust stores or certifi yet. The bundled file
+# is the official cross-sign of Root YR by ISRG Root X1, so verification stays
+# fully on (hostname + chain) and is anchored at the already-trusted X1.
+#   source:  https://letsencrypt.org/certs/gen-y/root-yr-by-x1.pem
+#   sha256:  07:26:39:D0:B1:40:D5:BF:FA:E1:6A:D9:C3:F6:CC:60:86:04:06:21:F5:1E:E6:1A:6D:46:A8:91:5C:07:CF:76
+#   expires: 2032-09-02
+# Delete it once Root YR ships in system stores.
+EXTRA_CA_FILES = [Path(__file__).resolve().parent / "certs" / "isrg-root-yr-by-x1.pem"]
+
+def extra_trust_context() -> ssl.SSLContext:
+    """Default verification plus EXTRA_CA_FILES. Never disables checks."""
+    context = ssl.create_default_context()
+    for path in EXTRA_CA_FILES:
+        if path.exists():
+            context.load_verify_locations(cafile=str(path))
+    # the bundled cert is an intermediate (cross-signed), so it has to be
+    # usable as a chain anchor; the default on Python 3.13+, explicit here
+    context.verify_flags |= getattr(ssl, "VERIFY_X509_PARTIAL_CHAIN", 0)
+    return context
+
+EXTRA_TRUST = extra_trust_context()
 
 class FetchError(RuntimeError):
     pass
@@ -46,7 +66,7 @@ class FetchError(RuntimeError):
 # --------------------------------------------------------------------------
 
 def fetch(url: str, *, referer: str | None = None, timeout: int = 25, retries: int = 2,
-          headers: dict | None = None, relaxed_tls: bool = False, data: bytes | None = None,
+          headers: dict | None = None, extra_trust: bool = False, data: bytes | None = None,
           method: str | None = None) -> str:
     hdrs = {
         "User-Agent": UA,
@@ -62,7 +82,7 @@ def fetch(url: str, *, referer: str | None = None, timeout: int = 25, retries: i
     for attempt in range(retries + 1):
         try:
             request = urllib.request.Request(url, headers=hdrs, data=data, method=method)
-            context = RELAXED_TLS if relaxed_tls else None
+            context = EXTRA_TRUST if extra_trust else None
             with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
                 return response.read().decode("utf-8", "replace")
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
@@ -404,4 +424,13 @@ def write_body(entry: dict, body: dict, *, engine: str, scope: str) -> None:
     extra["extract_engine"] = engine
 
 def media_root(default: str = "data/telegram/media") -> Path:
-    return Path(default)
+    """Media lives under the project root, whatever the working directory."""
+    return PROJECT_ROOT / default
+
+def project_relative(path: Path) -> str:
+    """Store paths relative to the project root so they survive a cd."""
+    path = Path(path).resolve()
+    try:
+        return path.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return path.as_posix()

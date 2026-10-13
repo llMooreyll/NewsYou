@@ -522,7 +522,8 @@ def render_digest_panel(digest: dict) -> str:
     secs = []
     lead_html = (f'<article class="dg-lead rv" style="--i:1"><div class="no">01 · 头条</div>'
                  f'<h2>{esc(lead.get("title"))}</h2>'
-                 + (f'<p>{esc(lead.get("summary"))}</p>' if lead.get("summary") and lead.get("summary") != lead.get("title") else "")
+                 + ("".join(f"<p>{esc(x)}</p>" for x in re.split(r"\n\s*\n", lead.get("summary") or "") if x.strip())
+                    if lead.get("summary") and lead.get("summary") != lead.get("title") else "")
                  + f'<div class="dg-m">{topics(lead.get("topics"))}'
                  + (f'<span>{esc(lead.get("why"))}</span>' if lead.get("why") else "")
                  + f'<span>重要度 {esc(lead.get("importance"))}</span>{refs(lead.get("refs"))}</div></article>')
@@ -533,7 +534,7 @@ def render_digest_panel(digest: dict) -> str:
         rows = "".join(
             f'<article class="dg-it rv" style="--i:{i + 2}"><div class="no">{int(c.get("rank") or i + 2):02d}</div>'
             f'<div><h3>{esc(c.get("title"))}</h3>'
-            + (f'<p>{esc(c.get("summary"))}</p>' if c.get("summary") and c.get("summary") != c.get("title") else "")
+            + (f'<p>{esc(re.sub(r"\s+", " ", c.get("summary") or ""))}</p>' if c.get("summary") and c.get("summary") != c.get("title") else "")
             + f'<div class="dg-m">{topics(c.get("topics"))}'
             + (f'<span>{esc(c.get("why"))}</span>' if c.get("why") else "")
             + f'{refs(c.get("refs"))}</div></div>'
@@ -639,7 +640,9 @@ def telegram_parts(entry: dict) -> dict:
         body = (plain or "").strip()
         if title and body.startswith(title.rstrip("…")):
             body = body[len(title.rstrip("…")):].lstrip(" ，。,.:：\n")
-        kept = [esc(body)] if body else []
+        kept = []
+        for para in re.split(r"\n\s*\n", body):
+            kept += [esc(l) for l in para.split("\n") if l.strip()] + [""]
 
     # group lines into paragraphs on blank lines
     paras: list[list[str]] = [[]]
@@ -739,16 +742,35 @@ def _tg_card(entry: dict, index: int, embed: bool, out_dir: Path) -> tuple[str, 
                f'{"".join(blocks)}</template>')
 
     ai = f'<span class="tg-ai">AI 合并 {len(entry.get("merged_from") or [])}</span>' if merged else ""
+    srcs = ""
+    if merged and extra.get("merged_sources"):
+        srcs = '<div class="tg-src"><span>来源</span>' + "".join(
+            ext(m.get("url"), "@" + esc(m.get("channel") or "")) for m in extra["merged_sources"]) + "</div>"
     card = (f'<article class="tg" data-ch="{esc(channel)}">'
             f'<div class="tg-h">{ext("https://t.me/" + channel, "@" + esc(channel), "tg-ch")}{ai}'
             f'<time>{esc(fmt_time(entry.get("published_at")))}</time></div>'
-            f'{shots}{quote_html}{title}{body}{pill}{tags}{cmp_btn}'
+            f'{shots}{quote_html}{title}{body}{pill}{tags}{srcs}{cmp_btn}'
             f'<div class="tg-f">{views}{rx}{ext(entry.get("url"), "原帖" + ICON["out"], "go")}</div>'
             "</article>")
     return card, tpl
 
 
-def render_telegram_panel(items: list[dict], embed: bool, out_dir: Path) -> str:
+def _channel_note(status: dict | None) -> str:
+    """Failed or empty channels, from the collector's per-channel report."""
+    report = ((status or {}).get("collector_report") or {}).get("channels") or {}
+    failed = [c for c, r in report.items() if not r.get("ok")]
+    empty = [c for c, r in report.items() if r.get("ok") and not r.get("kept")]
+    rows = []
+    if failed:
+        rows.append('<p class="rail-note bad"><b>抓取失败</b>' + "".join(
+            f'<span title="{esc(report[c].get("error"))}">@{esc(c)}</span>' for c in failed) + "</p>")
+    if empty:
+        rows.append('<p class="rail-note"><b>当日无消息</b>' + "".join(
+            f'<span title="最新 {esc(report[c].get("newest_day") or "无")}">@{esc(c)}</span>' for c in empty) + "</p>")
+    return "".join(rows)
+
+
+def render_telegram_panel(items: list[dict], embed: bool, out_dir: Path, status: dict | None = None) -> str:
     cards, tpls = [], []
     counts: dict[str, int] = {}
     for index, entry in enumerate(items, 1):
@@ -761,7 +783,11 @@ def render_telegram_panel(items: list[dict], embed: bool, out_dir: Path) -> str:
         (ch, "@" + ch, n) for ch, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
     ]
     grid = f'<div class="mas">{"".join(cards)}</div>{"".join(tpls)}'
-    return with_rail(rail(links, "filter", "频道"), grid)
+    rail_html = rail(links, "filter", "频道")
+    note = _channel_note(status)
+    if note:
+        rail_html = rail_html.replace("</aside>", f"{note}</aside>")
+    return with_rail(rail_html, grid)
 
 
 # --------------------------------------------------------------------------
@@ -1056,7 +1082,7 @@ def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: b
         extra_meta = ""
 
         if name == "telegram":
-            body = render_telegram_panel(items, embed, output.parent)
+            body = render_telegram_panel(items, embed, output.parent, status)
             sub = f"{sub} · {len({(e.get('extra') or {}).get('channel') for e in items})} 个频道"
         elif name == "linuxdo":
             issue = next(((e.get("extra") or {}).get("issue_title") for e in items

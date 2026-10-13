@@ -235,10 +235,14 @@ which returns clean JSON:
 
 Two quirks:
 
-1. **The TLS chain is incomplete.** `openssl s_client` shows a valid
-   `CN=www.latepost.com` certificate from Let's Encrypt, but the intermediate is
-   not sent, so strict verification fails — `curl` fails too, not just Python.
-   The collector uses a relaxed context for this host only and documents why.
+1. **The TLS chain ends at a root most stores lack.** The certificate is from
+   Let's Encrypt's "Generation Y" chain (leaf → YR1 → Root YR), and Root YR is
+   not yet in system trust stores or certifi, so strict verification fails.
+   Verification is **not** disabled: `base.EXTRA_TRUST` adds the official
+   cross-sign of Root YR by ISRG Root X1
+   (`tools/collectors/certs/isrg-root-yr-by-x1.pem`, valid to 2032-09-02), so the
+   chain validates against the already-trusted X1 with hostname checks on.
+   Delete the file once Root YR ships in trust stores.
 2. **Dates appear in three places.** The API gives `release_time` as `10月10日`
    with no year; the detail header gives `10月10日 14:10`; and the page contains
    an unrelated `2026/10/10` string. The collector reads the **header element**

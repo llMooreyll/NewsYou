@@ -14,11 +14,12 @@ FULLTEXT ?= today
 AI       ?= none
 AI_MODEL ?=
 
-.PHONY: help setup check collect ai demo render all ab archive clean
+.PHONY: help setup check test collect ai demo render all ab archive clean
 
 help:
 	@echo "setup     create .venv and install requirements.txt"
 	@echo "check     verify the pipeline imports and both engines resolve"
+	@echo "test      run the offline regression tests"
 	@echo "collect   fetch every source into data/collected"
 	@echo "ai        apply stage-2 decisions (AI=pi to call the model, default none)"
 	@echo "demo      seed example decisions without a model, then apply them"
@@ -37,6 +38,9 @@ check:
 	$(PY) -c "import trafilatura, feedparser; print('modern engine: ok')"
 	$(PY_SYS) -c "import sys; sys.path.insert(0,'tools'); \
 from collectors import extract as ex; print('legacy engine: ok')"
+
+test:
+	$(PY) -m unittest discover -s tests -v
 
 collect:
 	$(PY) tools/collect.py --all --fulltext $(FULLTEXT) \

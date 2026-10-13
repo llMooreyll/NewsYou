@@ -7,11 +7,12 @@ input. All site-specific logic lives in tools/collectors/<source>.py.
 
 Two interchangeable extraction engines (``--engine``):
 
-  legacy   standard library only — hand-rolled regex feeds and per-site body
-           markers. Default. Needs nothing installed.
   modern   trafilatura for article bodies, feedparser for feeds. One code path
-           for every site, keeps inline links and headings. Needs the optional
-           dependencies in requirements.txt.
+           for every site, keeps inline links and headings. Default; needs the
+           dependencies in requirements.txt and falls back to legacy (with a
+           warning) when they are missing.
+  legacy   standard library only — hand-rolled regex feeds and per-site body
+           markers. Needs nothing installed.
 
 Running both engines produces two independent data sets, which is how the
 shadow-mode comparison works:
@@ -63,7 +64,7 @@ def _postprocess(name: str, items: list[dict], args, outdir: Path) -> list[dict]
     items, groups = base.dedupe(items)
     outdir.mkdir(parents=True, exist_ok=True)
     if not args.no_images:
-        saved = tg.download_for_items(items, Path("data/telegram/media"),
+        saved = tg.download_for_items(items, base.media_root(),
                                       args.images_per_post, args.image_cap)
         print(f"  telegram images saved: {saved}", file=sys.stderr)
     (outdir / "telegram_duplicate_groups.json").write_text(
@@ -146,6 +147,14 @@ def main() -> int:
 
             results[name] = items
             statuses[name] = base.source_status(items, today)
+            # collectors may expose a structured report (telegram: per channel),
+            # so partial failures are recorded instead of only printed
+            if hasattr(module, "last_report"):
+                statuses[name]["collector_report"] = module.last_report()
+                failed = [c for c, r in (statuses[name]["collector_report"].get("channels") or {}).items()
+                          if not r.get("ok")]
+                if failed:
+                    print(f"  partial failure: {', '.join(failed)}", file=sys.stderr)
             fresh = ("today" if statuses[name]["updated_today"]
                      else f"{statuses[name]['staleness_days']}d ago")
             bodies = statuses[name]["fulltext_fetched"]

@@ -37,7 +37,7 @@ CHANNELS = [
     "DNSPODT",
 ]
 
-DEFAULT_MEDIA_ROOT = Path("data/telegram/media")
+DEFAULT_MEDIA_ROOT = base.media_root()
 
 class PreviewError(RuntimeError):
     pass
@@ -62,6 +62,7 @@ TEXT_DIV = re.compile(
 # the message title. The reply is now removed and the real text div is targeted.
 REPLY_MARKER = re.compile(r'<a class="tgme_widget_message_reply[^"]*"', re.S)
 MESSAGE_TEXT_MARKER = re.compile(r'<div class="tgme_widget_message_text[^"]*js-message_text"', re.S)
+MESSAGE_TEXT_WRAPPER = re.compile(r'\s*<div class="tgme_widget_message_text\b')
 REACTIONS_BLOCK = re.compile(r'<div class="tgme_widget_message_reactions.*?</div>', re.S)
 REACTION = re.compile(
     r'<span class="tgme_reaction"><i class="emoji"[^>]*><b>([^<]+)</b></i>([^<]*)</span>'
@@ -218,6 +219,13 @@ def parse_posts(page_html: str) -> list[dict]:
             fallback = TEXT_DIV.search(text_block)
             text_element = f"<div>{fallback.group(1)}</div>" if fallback else ""
         inner_html = _element_inner(text_element)
+        # the fallback path (and some edited posts) can hand back the text div
+        # itself; text_html is defined as the *inside* of that div
+        while MESSAGE_TEXT_WRAPPER.match(inner_html):
+            unwrapped = _element_inner(base.balanced_element(inner_html, "div", inner_html.find("<div")))
+            if unwrapped == inner_html:
+                break
+            inner_html = unwrapped
         text = strip_tags(inner_html)
         text_html = inner_html
 
@@ -336,7 +344,7 @@ def download_images(posts: list[dict], channel: str, media_root: Path,
                 break
             existing = sorted(target_dir.glob(f"{index:02d}.*"))
             if existing and existing[0].stat().st_size > 0:
-                local.append(str(existing[0]))
+                local.append(base.project_relative(existing[0]))
                 files += 1
                 total_bytes += existing[0].stat().st_size
                 skipped += 1
@@ -350,7 +358,7 @@ def download_images(posts: list[dict], channel: str, media_root: Path,
                       or Path(urllib.parse.urlparse(url).path).suffix or ".jpg")
             path = target_dir / f"{index:02d}{suffix}"
             path.write_bytes(payload)
-            local.append(str(path))
+            local.append(base.project_relative(path))
             files += 1
             total_bytes += len(payload)
             time.sleep(delay)
@@ -374,32 +382,54 @@ def resolve_day(day: str, reference=None) -> str | None:
         return day
     return None
 
+# Per-channel outcome of the last collect() call. collect.py stores it in the
+# source status so a failing or empty channel is visible, not just a log line.
+_LAST_REPORT: dict = {}
+
+def last_report() -> dict:
+    return dict(_LAST_REPORT)
+
+def pick_day(day_counts_by_channel: dict[str, dict[str, int]]) -> str | None:
+    """'auto': the newest day any channel has posts for, shared by all channels.
+
+    Choosing per channel let a channel that was quiet today contribute
+    yesterday's posts under today's panel, and let channels disagree on the day.
+    """
+    days = {d for counts in day_counts_by_channel.values() for d in counts}
+    return max(days) if days else None
+
 def collect(limit: int = 400, day: str = "auto", pages: int = 4,
             channels: list[str] | None = None, **_):
     channels = channels or CHANNELS
     target = resolve_day(day)
-    auto = target is None
-    collected: list[dict] = []
+    walked: dict[str, list[dict]] = {}
+    report: dict[str, dict] = {}
 
     for channel in channels:
-        channel_items: list[dict] = []
         try:
-            channel_items = walk_channel(channel, pages, None)
+            walked[channel] = walk_channel(channel, pages, None)
         except PreviewError as exc:
             print(f"  ! telegram {channel} failed: {exc}", file=sys.stderr)
-            continue
+            report[channel] = {"ok": False, "error": str(exc), "fetched": 0, "kept": 0}
 
-        day_counts: dict[str, int] = {}
-        for post in channel_items:
+    day_counts: dict[str, dict[str, int]] = {}
+    for channel, posts in walked.items():
+        counts: dict[str, int] = {}
+        for post in posts:
             dt = base.to_cst(post.get("published_at"))
             if dt:
-                day_counts[dt.date().isoformat()] = day_counts.get(dt.date().isoformat(), 0) + 1
-        channel_day = target if target else (max(day_counts) if day_counts else None)
+                counts[dt.date().isoformat()] = counts.get(dt.date().isoformat(), 0) + 1
+        day_counts[channel] = counts
+    chosen = target or pick_day(day_counts)
 
-        for post in channel_items:
+    collected: list[dict] = []
+    for channel, posts in walked.items():
+        kept = 0
+        for post in posts:
             dt = base.to_cst(post.get("published_at"))
-            if not dt or not channel_day or dt.date().isoformat() != channel_day:
+            if not dt or not chosen or dt.date().isoformat() != chosen:
                 continue
+            kept += 1
             text = post.get("text") or ""
             collected.append(base.item(
                 SOURCE, f"Telegram · @{channel}",
@@ -418,13 +448,22 @@ def collect(limit: int = 400, day: str = "auto", pages: int = 4,
                     "text": text,
                     "text_html": post.get("text_html") or "",
                     "reply_text": post.get("reply_text") or "",
-                    "day": channel_day,
+                    "day": chosen,
                 },
             ))
+        newest = max(day_counts.get(channel) or {"": 0})
+        report[channel] = {"ok": True, "fetched": len(posts), "kept": kept,
+                           "newest_day": newest or None}
+        if kept == 0:
+            print(f"  telegram {channel}: no posts on {chosen} (newest {newest or 'none'})",
+                  file=sys.stderr)
 
+    _LAST_REPORT.clear()
+    _LAST_REPORT.update({"day": chosen, "mode": "fixed" if target else "auto",
+                         "channels": {c: report[c] for c in channels if c in report}})
     collected.sort(key=lambda x: str(x.get("published_at") or ""), reverse=True)
-    if auto and collected:
-        print(f"  telegram: auto-selected day {collected[0]['extra'].get('day')}", file=sys.stderr)
+    if not target and chosen:
+        print(f"  telegram: auto-selected day {chosen} for all channels", file=sys.stderr)
     return collected[:limit]
 
 def download_for_items(items: list[dict], media_root: Path, per_post: int = 2,

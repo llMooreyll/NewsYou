@@ -294,6 +294,7 @@ python tools/render_digest.py --no-embed     # 图片不内嵌，文件更小但
 1. **写抓取函数** `source_<name>(limit, fulltext=..., **_) -> list[dict]`
    - 必须返回含 `title`、`url` 的 dict 列表
    - 建议用 `item()` 辅助函数构造，它会自动算 `content_hash` 和 `dedupe_key`
+   - 阶段 2 的条目 id：Telegram 为 `telegram:<频道>:<消息号>`，其余为 `<信源>:<规范化 URL 的哈希>`；旧的 `<信源>:<content_hash>` id 仍可解析，旧决策文件不会失效
    - 时间戳尽量给 `published_at` + `date_source`
    - 全文写进 `body_text`，用 `fulltext_targets(items, fulltext)` 决定抓哪些
 
@@ -354,3 +355,13 @@ python tools/render_digest.py --indir data/processed --output site/digest.html
 - **AI 步骤不会自动联网**：`data/ai/*_input.json` 只是本地文件，是否交给模型由你决定。
 - Telegram 现行 API 条款限制将平台数据用于 AI/ML 训练与微调。若严格解读，请保持阶段 2 为手动、或跳过阶段 2，仅依赖阶段 1 的去重 + 人工审核。
 - 本文档不构成法律意见。
+
+---
+
+## 测试
+
+```bash
+make test        # 等同于 ./.venv/bin/python -m unittest discover -s tests -v
+```
+
+`tests/` 下是离线回归测试（不联网，抓取全部用合成输入替代），覆盖 linux.do 板块名、Telegram 统一日期与频道报告、消息正文解析、图片路径、TLS、归档替换、条目 id、合并规则和渲染。

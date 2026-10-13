@@ -3,7 +3,8 @@
 
 The list comes from a form POST to /site/index (an XHR endpoint that needs the
 X-Requested-With header). The site serves an incomplete certificate chain, so
-requests use RELAXED_TLS. The article header carries the real date and author,
+requests use base.EXTRA_TRUST (full verification plus Let's Encrypt's
+cross-signed Root YR; see base.py). The article header carries the real date and author,
 which override the relative date from the list.
 """
 from __future__ import annotations
@@ -29,7 +30,7 @@ def _list(pages: int = 1, per_page: int = 20) -> list[dict]:
     out: list[dict] = []
     for page in range(1, pages + 1):
         body = urllib.parse.urlencode({"page": page, "limit": per_page}).encode()
-        raw = base.fetch(LIST_URL, data=body, relaxed_tls=True, headers={
+        raw = base.fetch(LIST_URL, data=body, extra_trust=True, headers={
             "X-Requested-With": "XMLHttpRequest",
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
             "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -62,7 +63,7 @@ def collect(limit: int = 15, fulltext=base.FULLTEXT_DEFAULT, engine: str = "lega
     for entry in base.fulltext_targets(items, fulltext):
         scope = base.fulltext_scope_label(entry)
         try:
-            detail = base.fetch(entry["url"], relaxed_tls=True)
+            detail = base.fetch(entry["url"], extra_trust=True)
         except FetchError as exc:
             print(f"  ! latepost body failed: {exc}", file=sys.stderr)
             continue

@@ -20,6 +20,7 @@ Pure functions only. File IO lives in tools/ai_apply.py and tools/collect.py.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -56,15 +57,37 @@ def load_prompt(name: str) -> str:
 # Identity
 # --------------------------------------------------------------------------
 
+def _url_key(url: str) -> str:
+    """canonical_key without importing the collectors (keeps this module pure)."""
+    from urllib.parse import urlparse, parse_qsl, urlencode
+    parsed = urlparse(url or "")
+    host = (parsed.netloc or "").lower()
+    host = host[4:] if host.startswith("www.") else host
+    drop = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+            "spm", "from", "share_token", "ref"}
+    pairs = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k.lower() not in drop]
+    return f"{host}{(parsed.path or '').rstrip('/')}" + (("?" + urlencode(pairs)) if pairs else "")
+
+
 def item_id(entry: dict) -> str:
     """Stable reference used by the model and by the applier.
 
     Telegram keeps its channel/message identity so a human can find the post.
-    Everything else uses the content hash, which is stable across runs.
+    Everything else is keyed by its canonical URL: a title hash collided when
+    two items shared a title and changed whenever a title was edited.
     """
     extra = entry.get("extra") or {}
     if entry.get("source") == "telegram" and extra.get("message_id") is not None:
         return f"telegram:{extra.get('channel')}:{extra.get('message_id')}"
+    key = _url_key(entry.get("url") or "")
+    if not key:
+        return f"{entry.get('source')}:{entry.get('content_hash')}"
+    return f"{entry.get('source')}:{hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]}"
+
+
+def legacy_item_id(entry: dict) -> str:
+    """The pre-URL id (source:content_hash), accepted as an alias so decision
+    files written before the change still resolve."""
     return f"{entry.get('source')}:{entry.get('content_hash')}"
 
 
@@ -168,9 +191,14 @@ class DecisionError(ValueError):
     pass
 
 
-def _clean_text(value, limit: int = 2000) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    return text[:limit]
+def _clean_text(value, limit: int = 2000, *, keep_paragraphs: bool = False) -> str:
+    """Collapse whitespace. With keep_paragraphs, paragraph breaks (blank
+    lines) survive, so multi-paragraph summaries do not render as one block."""
+    raw = str(value or "")
+    if not keep_paragraphs:
+        return re.sub(r"\s+", " ", raw).strip()[:limit]
+    paras = [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\n\s*\n", raw.replace("\r", ""))]
+    return "\n\n".join(p for p in paras if p)[:limit]
 
 
 def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[list[dict], list[str]]:
@@ -246,10 +274,10 @@ def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[l
             if unknown:
                 problems.append(f"action {index}: unknown merge_ids {unknown}")
                 members = [m for m in members if m in known_ids]
-            blocked = [m for m in members if m in removed]
+            blocked = [m for m in members if m in removed or m in dropped]
             if blocked:
-                problems.append(f"action {index}: merge_ids already removed as ads {blocked}")
-                members = [m for m in members if m not in removed]
+                problems.append(f"action {index}: merge_ids already removed or dropped {blocked}")
+                members = [m for m in members if m not in removed and m not in dropped]
             if not members:
                 problems.append(f"action {index}: merge has no valid merge_ids")
                 continue
@@ -266,7 +294,7 @@ def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[l
                 problems.append(f"action {index}: merge_ids equal primary only")
                 continue
             title = _clean_text(action.get("title"), 300)
-            summary = _clean_text(action.get("summary"), 3000)
+            summary = _clean_text(action.get("summary"), 3000, keep_paragraphs=True)
             if not title or not summary:
                 problems.append(f"action {index}: merge needs both title and summary")
                 continue
@@ -326,7 +354,7 @@ def validate_digest_decisions(decisions: dict, known_ids: set[str],
             problems.append(f"highlight {index}: no valid item_ids, skipped")
             continue
         title = _clean_text(item.get("title"), 300)
-        summary = _clean_text(item.get("summary"), 2000)
+        summary = _clean_text(item.get("summary"), 2000, keep_paragraphs=True)
         if not title:
             problems.append(f"highlight {index}: missing title, skipped")
             continue
@@ -387,6 +415,15 @@ def validate_digest_decisions(decisions: dict, known_ids: set[str],
 # --------------------------------------------------------------------------
 # Apply
 # --------------------------------------------------------------------------
+
+def _union(lists) -> list:
+    out: list = []
+    for values in lists:
+        for value in values or []:
+            if value and value not in out:
+                out.append(value)
+    return out
+
 
 def apply_telegram_decisions(items: list[dict], actions: list[dict]) -> tuple[list[dict], dict]:
     """Apply drop/merge. Raw items are never mutated.
@@ -454,6 +491,12 @@ def apply_telegram_decisions(items: list[dict], actions: list[dict]) -> tuple[li
             extra["merged_from"] = members
             extra["merge_confidence"] = action.get("confidence")
             extra["ai_topics"] = action.get("topics") or []
+            # every member's media, primary first: a merge must not lose the
+            # images that only a secondary message carried
+            extra["local_images"] = _union(o["local_images"] for o in originals)
+            extra["photos"] = _union(o["photos"] for o in originals)
+            extra["media"] = _union(o["media"] for o in originals)
+            extra["merged_sources"] = [{"channel": o["channel"], "url": o["url"]} for o in originals]
             merged["extra"] = extra
             if action.get("topics"):
                 merged["tags"] = action["topics"]
@@ -548,6 +591,9 @@ def build_item_index(results: dict[str, list[dict]]) -> tuple[dict[str, dict], d
         for entry in items:
             key = item_id(entry)
             index[key] = entry
+            old = legacy_item_id(entry)
+            if old != key:
+                aliases.setdefault(old, key)
             for absorbed in entry.get("merged_from") or []:
                 if absorbed != key:
                     aliases[absorbed] = key

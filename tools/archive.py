@@ -82,6 +82,26 @@ def final_name(root: Path, day: str, force: bool) -> Path:
             return candidate
     raise SystemExit(f"too many snapshots for {day}")
 
+def install_snapshot(staging: Path, final: Path) -> None:
+    """Move a finished staging directory into place without a window of loss.
+
+    An existing snapshot is first renamed aside, never deleted up front. If
+    installing the new one fails, the old one is renamed back; it is removed
+    only after the new snapshot is in place.
+    """
+    backup = None
+    if final.exists():
+        backup = final.with_name(f".old-{final.name}-{os.getpid()}")
+        final.rename(backup)
+    try:
+        staging.rename(final)
+    except BaseException:
+        if backup is not None and not final.exists():
+            backup.rename(final)
+        raise
+    if backup is not None:
+        shutil.rmtree(backup, ignore_errors=True)
+
 def summarise(snapshot: Path) -> dict:
     """Collect the facts worth recording in the manifest."""
     index = load_json(snapshot / "collected/index.json") or {}
@@ -208,9 +228,7 @@ def main() -> int:
             if final.name != day:
                 print(f"note: {root / day} exists; writing {final} instead "
                       f"(use --force to replace)", file=sys.stderr)
-            if final.exists():
-                shutil.rmtree(final)
-            staging.rename(final)
+            install_snapshot(staging, final)
             snapshot = final
     finally:
         # On failure the staging directory is discarded, leaving any existing
