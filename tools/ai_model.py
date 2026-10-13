@@ -251,6 +251,7 @@ def generate(backend: str, input_path: Path, output_path: Path, *,
              model: str | None = None, timeout: int = DEFAULT_TIMEOUT,
              force: bool = False, dry_run: bool = False,
              extra_args: list[str] | None = None,
+             day: str | None = None,
              verbose: bool = True) -> dict:
     """Ask the backend for decisions and write them to `output_path`.
 
@@ -312,6 +313,13 @@ def generate(backend: str, input_path: Path, output_path: Path, *,
         parsed["model_self_reported"] = claimed
     parsed["model"] = actual
     report["model_filled"] = actual
+
+    # The day gets the same treatment. A decisions file is applied only to the
+    # day it records (ai_apply.load_decisions), so that has to be the day of
+    # the input it answered. The prompts show an example day, and a model that
+    # echoes the example back would otherwise have its fresh answer discarded.
+    if day:
+        parsed["day"] = day
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(parsed, ensure_ascii=False, indent=2) + "\n",

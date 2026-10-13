@@ -6,6 +6,9 @@ No network: every fetch is replaced with synthetic input.
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
 import ssl
 import sys
@@ -19,6 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 from collectors import base, linuxdo, telegram as tg  # noqa: E402
+import ai_apply  # noqa: E402
+import ai_model  # noqa: E402
 import ai_stage  # noqa: E402
 import archive  # noqa: E402
 import render_digest  # noqa: E402
@@ -230,6 +235,102 @@ class TelegramMerge(unittest.TestCase):
         self.assertEqual([x["op"] for x in actions], ["drop"])
         self.assertIsNone(actions[0]["canonical_id"])
         self.assertEqual(len(problems), 4)
+
+
+# --------------------------------------------------------------------------
+# stage 2 end to end: only this run's data, only this day's decisions
+# --------------------------------------------------------------------------
+
+DAY, DAY_BEFORE, DAY_AFTER = "2026-10-13", "2026-10-12", "2026-10-14"
+
+
+class StageTwoRun(unittest.TestCase):
+    """data/ outlives a run, so stage 2 has to tell this run's files from the
+    ones an earlier day left behind. Nothing here calls a model."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.collected, self.ai, self.out = (self.root / n for n in ("collected", "ai", "processed"))
+        self.story = _item("hackernews", "Still on the front page", "https://example.com/a")
+        self.collect("hackernews", [self.story])
+        self.write(self.collected / "index.json", {"day": DAY, "sources": {}})
+
+    def write(self, path: Path, payload) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    def collect(self, name: str, items: list[dict], on: str = DAY) -> None:
+        self.write(self.collected / f"{name}.json", {
+            "source": name, "collected_at": f"{on}T08:00:00+08:00", "count": len(items),
+            "status": {"updated_today": True}, "items": items})
+
+    def decide(self, day: str) -> None:
+        self.write(self.ai / "digest_decisions.json", {
+            "schema": ai_stage.DIGEST_SCHEMA, "day": day, "headline": f"headline of {day}",
+            "highlights": [{"item_ids": [ai_stage.item_id(self.story)], "title": "T",
+                            "summary": "S", "importance": 90}]})
+
+    def run_stage(self, backend: str = "none") -> str:
+        argv = ["ai_apply.py", "--collected", str(self.collected), "--ai", str(self.ai),
+                "--out", str(self.out), "--ai-backend", backend]
+        log = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(log):
+            self.assertEqual(ai_apply.main(), 0)
+        return log.getvalue()
+
+    def panel(self):
+        path = self.out / "digest.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+    def test_decisions_for_this_day_are_applied(self):
+        self.decide(DAY)
+        self.run_stage()
+        self.assertEqual(self.panel()["headline"], f"headline of {DAY}")
+
+    def test_decisions_from_another_day_are_not_applied(self):
+        self.decide(DAY_BEFORE)
+        log = self.run_stage()
+        self.assertIsNone(self.panel())
+        self.assertIn("not applied", log)
+
+    def test_a_failed_model_call_does_not_fall_back_to_old_decisions(self):
+        self.decide(DAY_BEFORE)
+        with mock.patch.object(ai_model.shutil, "which", return_value="/fake/pi"), \
+             mock.patch.object(ai_model, "_invoke", side_effect=ai_model.ModelError("timed out")) as call:
+            self.run_stage(backend="pi")
+        self.assertTrue(call.called)
+        self.assertIsNone(self.panel())
+
+    def test_a_fresh_answer_is_applied_whatever_day_the_model_claims(self):
+        answer = json.dumps({"day": DAY_BEFORE, "headline": "fresh", "highlights": [
+            {"item_ids": [ai_stage.item_id(self.story)], "title": "T", "summary": "S"}]})
+        with mock.patch.object(ai_model.shutil, "which", return_value="/fake/pi"), \
+             mock.patch.object(ai_model, "_invoke", return_value=answer):
+            self.run_stage(backend="pi")
+        self.assertEqual(self.panel()["headline"], "fresh")
+        self.assertEqual(self.panel()["day"], DAY)
+
+    def test_a_source_file_from_an_earlier_day_is_skipped(self):
+        self.collect("weibo", [_item("weibo", "昨天的热搜", "https://s.weibo.com/x")], on=DAY_BEFORE)
+        log = self.run_stage()
+        self.assertFalse((self.out / "weibo.json").exists())
+        self.assertTrue((self.out / "hackernews.json").exists())
+        self.assertIn("weibo.json was collected on", log)
+
+    def test_a_run_that_crosses_midnight_keeps_its_own_files(self):
+        self.collect("weibo", [_item("weibo", "热搜", "https://s.weibo.com/x")], on=DAY_AFTER)
+        self.run_stage()
+        self.assertTrue((self.out / "weibo.json").exists())
+
+    def test_output_of_an_earlier_run_is_removed(self):
+        self.write(self.out / "weibo.json", {"source": "weibo", "items": []})
+        self.write(self.out / "digest.json", {"cards": [{"title": "old"}]})
+        self.write(self.out / "notes.json", {"mine": True})
+        self.run_stage()
+        self.assertEqual(sorted(p.name for p in self.out.glob("*.json")),
+                         ["hackernews.json", "index.json", "notes.json"])
 
 
 class RendererReport(unittest.TestCase):

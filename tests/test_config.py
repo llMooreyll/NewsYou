@@ -192,6 +192,17 @@ class Provenance(unittest.TestCase):
         self.assertEqual(written["model"], "pi:deepseek-v4.1-flash")
         self.assertEqual(written["model_self_reported"], "some-other-model")
 
+    def test_recorded_day_is_the_day_of_the_input(self):
+        """The prompts show an example day; a model may echo it back."""
+        import json
+        out = Path(tempfile.mkdtemp()) / "decisions.json"
+        inp = out.with_name("input.json")
+        inp.write_text("{}", encoding="utf-8")
+        raw = json.dumps({"schema": "x", "day": "2026-10-12", "actions": []})
+        with mock.patch.object(ai_model, "_invoke", return_value=raw):
+            ai_model.generate("pi", inp, out, day="2026-10-14", verbose=False)
+        self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["day"], "2026-10-14")
+
 class ReusePolicy(unittest.TestCase):
     """A decisions file is only valid for the day it was made for.
 

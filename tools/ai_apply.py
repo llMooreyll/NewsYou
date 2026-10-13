@@ -48,7 +48,18 @@ def load_json(path: Path):
         return None
 
 
-def load_collected(indir: Path) -> tuple[dict[str, list[dict]], dict]:
+def load_collected(indir: Path, day: str | None = None) -> tuple[dict[str, list[dict]], dict]:
+    """Load the sources that belong to the run for `day`.
+
+    data/collected/ outlives a run, and collect.py writes a file only for a
+    source that succeeded. A source that fails today, or one switched off in
+    `sources.enabled`, therefore still has its file from an earlier day sitting
+    here, status and all. Loading by glob alone put that file in today's digest
+    under a "今日更新" badge. A file written before `day` is skipped, and says so.
+
+    Before, not merely different: a run that crosses midnight stamps its files
+    one day after the index day, and those are this run's own.
+    """
     results: dict[str, list[dict]] = {}
     statuses: dict[str, dict] = {}
     index = load_json(indir / "index.json") or {}
@@ -57,6 +68,11 @@ def load_collected(indir: Path) -> tuple[dict[str, list[dict]], dict]:
             continue
         payload = load_json(path)
         if not isinstance(payload, dict):
+            continue
+        written = str(payload.get("collected_at") or "")[:10]
+        if day and written and written < day:
+            print(f"  ! {path.name} was collected on {written}, before {day}; "
+                  f"skipped (did the source fail or get disabled today?)", file=sys.stderr)
             continue
         results[path.stem] = payload.get("items") or []
         statuses[path.stem] = payload.get("status") or index.get("sources", {}).get(path.stem, {})
@@ -83,6 +99,49 @@ def decisions_are_stale(path: Path, day: str) -> bool:
     if not payload:
         return False
     return payload.get("day") != day
+
+
+def load_decisions(path: Path, day: str):
+    """A decisions file, but only one that was made for `day`.
+
+    Whether to *call* the model and whether to *apply* what is on disk are two
+    questions. force_for() answers the first. Nothing answered the second: with
+    the backend off, or when today's call failed, the file a previous day left
+    behind was read back and applied. Telegram ids do not survive a day, so
+    that half was inert, but URL-keyed ids do, and the digest panel came out
+    carrying yesterday's headline over today's items with no error anywhere.
+    """
+    payload = load_json(path)
+    if isinstance(payload, dict) and payload.get("day") != day:
+        print(f"  ! {path.name} is for {payload.get('day') or 'an unrecorded day'}, "
+              f"not {day}; not applied", file=sys.stderr)
+        return None
+    return payload
+
+
+def remove_leftovers(outdir: Path, written: set[str]) -> list[str]:
+    """Delete processed files an earlier run wrote and this one did not.
+
+    The renderer shows every source file in this directory and the archive
+    copies it whole, so a file left from another day is as good as current: a
+    source that dropped out today would keep its old panel, and a day without
+    decisions would keep the last briefing. Only this stage's own output is
+    removed — a source file names itself in `source`, the panel has `cards` —
+    so pointing --out at a shared directory cannot cost anything else.
+    """
+    removed: list[str] = []
+    for path in sorted(outdir.glob("*.json")):
+        if path.name in written:
+            continue
+        payload = load_json(path)
+        if not isinstance(payload, dict):
+            continue
+        is_panel = path.name == "digest.json" and "cards" in payload
+        is_source = payload.get("source") == path.stem and "items" in payload
+        if is_panel or is_source:
+            path.unlink()
+            removed.append(path.name)
+    return removed
 
 
 def main() -> int:
@@ -129,13 +188,13 @@ def main() -> int:
     if ai_warning:
         print(f"warning: {ai_warning}", file=sys.stderr)
 
-    results, statuses = load_collected(args.collected)
+    day = (load_json(args.collected / "index.json") or {}).get("day") \
+        or datetime.now().astimezone().date().isoformat()
+
+    results, statuses = load_collected(args.collected, day)
     if not results:
         print(f"no collected data in {args.collected}; run tools/collect.py first", file=sys.stderr)
         return 1
-
-    day = (load_json(args.collected / "index.json") or {}).get("day") \
-        or datetime.now().astimezone().date().isoformat()
 
     def force_for(path: Path) -> bool:
         """Regenerate unless the caller asked to reuse a file from this same day.
@@ -164,10 +223,10 @@ def main() -> int:
             ai_backend, args.ai / "telegram_input.json",
             args.ai / "telegram_decisions.json", model=args.ai_model,
             timeout=args.ai_timeout, force=force_for(args.ai / "telegram_decisions.json"),
-            dry_run=args.dry_run, extra_args=args.ai_extra_args)
+            dry_run=args.dry_run, extra_args=args.ai_extra_args, day=day)
 
     tg_decisions_path = args.ai / "telegram_decisions.json"
-    tg_decisions = load_json(tg_decisions_path)
+    tg_decisions = load_decisions(tg_decisions_path, day)
     if tg_decisions and "telegram" in processed:
         known = {ai_stage.item_id(e) for e in processed["telegram"]}
         actions, problems = ai_stage.validate_telegram_decisions(tg_decisions, known)
@@ -198,6 +257,7 @@ def main() -> int:
         print("telegram: no decisions file, keeping raw messages", file=sys.stderr)
 
     # ---------------- write processed sources ----------------
+    written: set[str] = set()
     if not args.dry_run:
         for name in ORDER:
             if name not in processed:
@@ -211,6 +271,7 @@ def main() -> int:
                 "status": statuses.get(name, {}),
                 "items": processed[name],
             })
+            written.add(f"{name}.json")
 
     # ---------------- stage 2b input ----------------
     digest_input = ai_stage.build_digest_input(processed, statuses, day)
@@ -228,10 +289,10 @@ def main() -> int:
             ai_backend, args.ai / "digest_input.json",
             args.ai / "digest_decisions.json", model=args.ai_model,
             timeout=args.ai_timeout, force=force_for(args.ai / "digest_decisions.json"),
-            dry_run=args.dry_run, extra_args=args.ai_extra_args)
+            dry_run=args.dry_run, extra_args=args.ai_extra_args, day=day)
 
     digest_decisions_path = args.ai / "digest_decisions.json"
-    digest_decisions = load_json(digest_decisions_path)
+    digest_decisions = load_decisions(digest_decisions_path, day)
     index_by_id, aliases = ai_stage.build_item_index(processed)
     if digest_decisions:
         digest, problems = ai_stage.validate_digest_decisions(digest_decisions, set(index_by_id), aliases)
@@ -240,6 +301,7 @@ def main() -> int:
         panel["day"] = panel.get("day") or day
         if not args.dry_run:
             write_json(args.out / "digest.json", panel)
+            written.add("digest.json")
         report["digest"] = {
             "decisions_file": str(digest_decisions_path),
             "model": digest.get("model"),
@@ -276,6 +338,9 @@ def main() -> int:
                 "digest": report.get("digest"),
             },
         })
+        written.add("index.json")
+        for name in remove_leftovers(args.out, written):
+            print(f"  removed {name} left by an earlier run", file=sys.stderr)
         print(f"wrote {args.out}/", file=sys.stderr)
     else:
         print("dry run: nothing written", file=sys.stderr)
