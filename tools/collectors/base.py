@@ -89,11 +89,17 @@ def strip_tags(fragment: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
-def balanced_div(html: str, start: int) -> str:
-    """Return the full <div>...</div> substring starting at `start`."""
-    if start < 0 or not html.startswith("<div", start):
+def balanced_element(html: str, tag: str, start: int) -> str:
+    """Return the full <tag>...</tag> substring starting at `start`.
+
+    Depth-counts nested opens of the same tag, so it works for elements that
+    contain other elements of the same kind (and for <a>, which is not a <div>).
+    """
+    if start < 0:
         return ""
-    tag_re = re.compile(r"<(/?)div\b[^>]*>", re.I)
+    if not re.match(rf"<{re.escape(tag)}\b", html[start:start + len(tag) + 2], re.I):
+        return ""
+    tag_re = re.compile(rf"<(/?){re.escape(tag)}\b[^>]*>", re.I)
     depth = 0
     index = start
     while True:
@@ -107,6 +113,10 @@ def balanced_div(html: str, start: int) -> str:
         else:
             depth += 1
         index = match.end()
+
+def balanced_div(html: str, start: int) -> str:
+    """Return the full <div>...</div> substring starting at `start`."""
+    return balanced_element(html, "div", start)
 
 def container_at(html: str, marker: str) -> str:
     """Find a class/id marker, walk back to its opening <div>, return balanced div."""

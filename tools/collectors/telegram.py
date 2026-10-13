@@ -56,6 +56,12 @@ TEXT_DIV = re.compile(
     r'(?:<div class="tgme_widget_message_(?:footer|reply_markup)|</div>)',
     re.S,
 )
+# A message can contain two text divs: the quoted reply (js-message_reply_text)
+# and the message itself (js-message_text). Matching the generic class picks up
+# the quote first, which is how the panel ended up showing replied-to content as
+# the message title. The reply is now removed and the real text div is targeted.
+REPLY_MARKER = re.compile(r'<a class="tgme_widget_message_reply[^"]*"', re.S)
+MESSAGE_TEXT_MARKER = re.compile(r'<div class="tgme_widget_message_text[^"]*js-message_text"', re.S)
 REACTIONS_BLOCK = re.compile(r'<div class="tgme_widget_message_reactions.*?</div>', re.S)
 REACTION = re.compile(
     r'<span class="tgme_reaction"><i class="emoji"[^>]*><b>([^<]+)</b></i>([^<]*)</span>'
@@ -151,6 +157,28 @@ def dedupe(values) -> list[str]:
             out.append(value)
     return out
 
+def _element_at(html: str, marker: re.Pattern, tag: str = "div") -> str:
+    """Return the balanced <tag> element the marker's opening tag begins.
+
+    The markers are written to start at the opening tag itself, so the match
+    offset is the element start. Taking "the last opener before the match"
+    instead would land on a nested or preceding element.
+    """
+    match = marker.search(html)
+    if not match:
+        return ""
+    return base.balanced_element(html, tag, match.start())
+
+def _element_inner(element: str, tag: str = "div") -> str:
+    """Strip the element's own opening and closing tags, keeping the inside."""
+    if not element:
+        return ""
+    open_end = element.find(">")
+    close_at = element.rfind(f"</{tag}>")
+    if open_end < 0 or close_at < 0:
+        return ""
+    return element[open_end + 1:close_at]
+
 def parse_reactions(block: str) -> list[dict]:
     reactions = []
     for emoji, count in REACTION.findall(block):
@@ -177,8 +205,21 @@ def parse_posts(page_html: str) -> list[dict]:
         reactions = parse_reactions(block)
         text_block = REACTIONS_BLOCK.sub("", block)
 
-        text_match = TEXT_DIV.search(text_block)
-        text = strip_tags(text_match.group(1)) if text_match else ""
+        # Drop the quoted reply before anything else reads the block, so its text,
+        # photos and link previews are not attributed to this message.
+        reply_element = _element_at(text_block, REPLY_MARKER, tag="a")
+        reply_text = strip_tags(_element_inner(reply_element, tag="a"))
+        if reply_element:
+            text_block = text_block.replace(reply_element, "")
+
+        text_element = _element_at(text_block, MESSAGE_TEXT_MARKER)
+        if not text_element:
+            # fall back to the old regex for pages with an unexpected structure
+            fallback = TEXT_DIV.search(text_block)
+            text_element = f"<div>{fallback.group(1)}</div>" if fallback else ""
+        inner_html = _element_inner(text_element)
+        text = strip_tags(inner_html)
+        text_html = inner_html
 
         date_match = DATE.search(text_block)
         views_match = VIEWS.search(text_block)
@@ -207,6 +248,8 @@ def parse_posts(page_html: str) -> list[dict]:
             "published_at": date_match.group(1) if date_match else None,
             "author": strip_tags(author_match.group(1)) if author_match else None,
             "text": text,
+            "text_html": text_html,
+            "reply_text": reply_text,
             "views_text": views_match.group(1) if views_match else None,
             "reactions": reactions,
             "media": media,
@@ -373,6 +416,8 @@ def collect(limit: int = 400, day: str = "auto", pages: int = 4,
                     "photos": post.get("photos") or [],
                     "reactions": post.get("reactions") or [],
                     "text": text,
+                    "text_html": post.get("text_html") or "",
+                    "reply_text": post.get("reply_text") or "",
                     "day": channel_day,
                 },
             ))

@@ -398,6 +398,7 @@ def apply_telegram_decisions(items: list[dict], actions: list[dict]) -> tuple[li
                     "source_name": source.get("source_name"),
                     "title": source.get("title"),
                     "text": extra.get("text") or source.get("summary") or "",
+                    "text_html": extra.get("text_html") or "",
                     "published_at": source.get("published_at"),
                     "url": source.get("url"),
                     "views": extra.get("views"),

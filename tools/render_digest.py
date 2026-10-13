@@ -149,13 +149,18 @@ def sanitize_html(fragment: str) -> str:
     Input comes from the extractor, but this is the last line of defence: the
     output is embedded in a shared single-file page, so scripts, event handlers
     and javascript: URLs must not survive.
+
+    Tags are balanced on the way out, so a fragment cut mid-element (Telegram
+    messages are frequently split right after an opening <b>) cannot leak an
+    unclosed tag into the rest of the page.
     """
     if not fragment:
         return ""
     out: list[str] = []
+    open_stack: list[str] = []
     pos = 0
     skip_until: str | None = None
-    a_stack: list[bool] = []
+    a_kept: list[bool] = []
 
     for match in _TAG_RE.finditer(fragment):
         text = fragment[pos:match.start()]
@@ -177,27 +182,35 @@ def sanitize_html(fragment: str) -> str:
             continue
         if name == "a":
             if closing:
-                if a_stack and a_stack.pop():
+                if a_kept and a_kept.pop():
                     out.append("</a>")
+                    if "a" in open_stack:
+                        open_stack.remove("a")
             else:
                 href = _safe_href(attrs)
                 if href:
-                    a_stack.append(True)
+                    a_kept.append(True)
+                    open_stack.append("a")
                     out.append(f'<a class="lnk" href="{esc(href)}" target="_blank" '
                                f'rel="noopener noreferrer">')
                 else:
-                    a_stack.append(False)
+                    a_kept.append(False)
             continue
         if name == "br":
             out.append("<br>")
         elif closing:
-            out.append(f"</{name}>")
+            if name in open_stack:
+                open_stack.remove(name)
+                out.append(f"</{name}>")
         else:
+            open_stack.append(name)
             out.append(f"<{name}>")
 
     tail = fragment[pos:]
     if skip_until is None and tail:
         out.append(esc(tail))
+    for name in reversed(open_stack):
+        out.append(f"</{name}>")
     return "".join(out)
 
 def _use_rich(entry: dict) -> bool:
@@ -205,10 +218,21 @@ def _use_rich(entry: dict) -> bool:
     return (entry.get("extra") or {}).get("extract_engine") == "modern"
 
 def body_fragment(block: dict, rich: bool) -> str:
-    """Render one body block, preserving links when the engine provided HTML."""
-    if rich and block.get("html"):
-        return sanitize_html(block["html"])
-    return paragraphs(block.get("text") or "")
+    """Render one body block, preserving links when the engine provided HTML.
+
+    Accepts either a section ({"text", "html"}) or a whole item
+    ({"body_text", "body_html"}). Those two shapes are different on purpose:
+    sections describe part of an article, items describe the article itself.
+    """
+    text = block.get("text")
+    if text is None:
+        text = block.get("body_text")
+    html_body = block.get("html")
+    if html_body is None:
+        html_body = block.get("body_html")
+    if rich and html_body:
+        return sanitize_html(html_body)
+    return paragraphs(text or "")
 
 
 def data_uri(path: Path) -> str:
@@ -365,6 +389,30 @@ def render_digest_panel(digest: dict) -> str:
 # telegram panel
 # --------------------------------------------------------------------------
 
+def _telegram_body(text: str, text_html: str) -> tuple[str, str]:
+    """Split a post into an optional lead line and the remaining body.
+
+    Telegram's own markup is kept when present, so inline links (the 「路透社」
+    style source links) survive instead of being flattened to text. The lead is
+    taken from the plain text and removed from the markup so the headline is not
+    shown twice.
+    """
+    lines = [l for l in (text or "").splitlines() if l.strip()]
+    head = lines[0] if len(lines) > 1 and len(lines[0]) <= 64 else ""
+    rest_lines = lines[1:] if head else lines
+
+    if text_html:
+        src = text_html
+        if head:
+            parts = re.split(r"<br\s*/?>", src, maxsplit=1)
+            src = parts[1] if len(parts) > 1 else ""
+        src = re.sub(r"^(?:\s*<br\s*/?>)+\s*", "", src).strip()
+        if src:
+            return head, f'<div class="tg-text">{sanitize_html(src)}</div>'
+    if rest_lines:
+        return head, '<div class="tg-text">' + "<br>".join(linkify(l) for l in rest_lines) + "</div>"
+    return head, ""
+
 def render_telegram_panel(items: list[dict], embed: bool, base_dir: Path) -> str:
     cards = []
     for index, entry in enumerate(items, 1):
@@ -374,10 +422,7 @@ def render_telegram_panel(items: list[dict], embed: bool, base_dir: Path) -> str
         text = entry.get("summary") if merged else (extra.get("text") or entry.get("summary") or "")
 
         # first line is often the headline of the post
-        lines = [l for l in (text or "").splitlines() if l.strip()]
-        head, rest = "", lines
-        if not merged and lines and len(lines[0]) <= 64 and len(lines) > 1:
-            head, rest = lines[0], lines[1:]
+        head, body_html = _telegram_body(text, "" if merged else (extra.get("text_html") or ""))
 
         # images first, above the text
         local = [p for p in (extra.get("local_images") or []) if Path(p).exists()]
@@ -400,9 +445,6 @@ def render_telegram_panel(items: list[dict], embed: bool, base_dir: Path) -> str
             shots = f'<div class="shots n{count}">{"".join(cells)}</div>'
 
         head_html = f'<p class="tg-lead">{esc(head)}</p>' if head else ""
-        body_html = ""
-        if rest:
-            body_html = '<div class="tg-text">' + "<br>".join(linkify(l) for l in rest if l.strip()) + "</div>"
 
         badges = []
         if merged:
@@ -450,7 +492,7 @@ def render_telegram_panel(items: list[dict], embed: bool, base_dir: Path) -> str
     <time>{esc(fmt_time(orig.get("published_at")))}</time>
     <a href="{esc(orig.get("url"))}" rel="noopener noreferrer">原文 ↗</a>
   </div>
-  <div class="orig-text">{linkify(orig.get("text") or "")}</div>
+  <div class="orig-text">{sanitize_html(orig.get("text_html")) if orig.get("text_html") else linkify(orig.get("text") or "")}</div>
 </div>''')
         overlays.append(
             f'<template id="orig-{index}"><h3 class="ov-title">原始消息 · {len(entry["originals"])} 条</h3>'
