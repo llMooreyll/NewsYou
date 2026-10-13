@@ -23,11 +23,21 @@ make check          # 验证依赖与两个引擎
 
 ## 2. 跑一次
 
+日常用这个：
+
 ```bash
-make all            # 抓取 → AI → 渲染，产出 site/digest.html
+make daily          # 抓取 → AI → 渲染 → 归档快照
 ```
 
-约 2–4 分钟（Telegram 图片下载和模型调用占大头）。不想调模型：
+约 2–4 分钟（Telegram 图片下载和模型调用占大头）。产出 `site/digest.html`（最新一期日报）和 `archive/<day>/`（当天快照）。
+
+只跑不归档：
+
+```bash
+make all            # 抓取 → AI → 渲染
+```
+
+不想调模型（AI 面板消失，其余照常）：
 
 ```bash
 make all AI=none
@@ -45,8 +55,9 @@ make all AI=none
 | `make ai` | 只做 AI 两阶段 → `data/processed/` |
 | `make render` | 只渲染 → `site/digest.html` |
 | `make all` | collect + ai + render |
+| `make daily` | **日常用这个**：all + 归档当天快照 |
 | `make demo` | 用启发式假决策跑通全流程，**不调模型** |
-| `make archive` | 归档当天快照 → `archive/<day>/` |
+| `make archive` | 归档当前产物（不重跑流水线） |
 | `make ab` | 两个引擎各跑一遍并出对比报告 |
 | `make clean` | 清掉生成的数据（保留 `site/digest.html` 与 `archive/`） |
 
@@ -77,12 +88,12 @@ make collect                           # 也可直接调脚本，见下
 ## 4. 输出在哪
 
 ```
-site/digest.html          单文件摘要，可直接分享
+site/digest.html          最新一期日报（单文件，可直接分享）
 data/collected/*.json     原始抓取结果（永不改写）
 data/ai/*_input.json      发给模型的输入
 data/ai/*_decisions.json  模型返回的决策
 data/processed/*.json     应用决策后的数据
-archive/<day>/            当天完整快照（gitignore）
+archive/<day>/            当天完整快照，含 digest.html 的副本（gitignore）
 ```
 
 `data/`、`archive/`、`reports/`、`.venv/` 都在 `.gitignore` 里；只有 `site/digest.html` 进版本控制。
@@ -114,7 +125,7 @@ make config
 | `backend` | `"pi"` | 用哪个 CLI。`pi` \| `codex` \| `none`。**`none` 是唯一关闭 AI 的方式** |
 | `model` | `"deepseek-v4.1-flash"` | 传给后端的模型名。留空字符串则让后端自选 |
 | `timeout` | `900` | 单次调用超时（秒） |
-| `reuse` | `true` | 复用已有的 `*_decisions.json`，不重复花钱调模型。`false` 等于 `--ai-force` |
+| `reuse` | `false` | 是否复用已有的 `*_decisions.json`。**默认 `false`：每次跑都会调模型**。设为 `true` 可省一次调用，但仅限同一天重跑——决策文件只对生成它的那一天有效，跨天的文件会被自动重新生成（见下） |
 | `args` | `[]` | 追加到命令行的额外参数（逃生舱），排在提示词之前 |
 
 关于 `backend` 与 `model` 两个字段的边界：它们能**标识**要跑什么，但**命令长什么样是每个后端自己的知识**。pi 和 codex 在可执行文件、子命令、隔离参数上全都不同：
@@ -238,12 +249,18 @@ channels = ["MaiTungNews", "...", "新频道名"]
 
 **换模型** → `make all AI_MODEL=gpt-5.6-sol`
 
-**只重跑某一天** → `make archive` 会自动生成 `archive/2026-10-13`；同日重跑生成 `-v2`，不覆盖。`--force` 才替换。
+**同一天重跑不想再花一次模型调用** → 在 `config.toml` 里设 `[ai] reuse = true`。注意它只对**同一天**有效：决策文件里记录了 `day`，跨天的文件会被自动重新生成。
 
-**重渲染已有归档**（不重新抓取）：
+**每天跑一次** → `make daily`：抓取 + AI + 渲染 + 归档快照。
+
+**只跑不归档** → `make all`（不写 `archive/`）。
+
+**补归档** → `make archive` 把**当前**产物快照一份；同日已有快照则生成 `-v2`，不覆盖。`make archive FORCE=1` 才替换：
 
 ```bash
-./.venv/bin/python tools/archive.py --skip-collect
+make archive                 # 快照当前 data/ 与 site/digest.html
+make archive FORCE=1         # 替换当天已有快照
+make archive DAY=2026-10-12  # 指定快照名
 ```
 
 **对比两个引擎的差异** → `make ab`，产出 `reports/engine-comparison.md`。
@@ -503,19 +520,42 @@ BACKEND_TABLE = {
 
 ## 5. 归档（`tools/archive.py`）
 
+`make daily` = `make all` + 归档。归档是**复制**，不是重跑，也不是移动：
+
 ```
 archive/
   index.json            清单（最新在前）
   2026-10-13/
-    meta.json           引擎、后端、条数、耗时
-    collected/  ai/  processed/
-    digest.html         自包含快照
+    meta.json           引擎、后端、条数、来源路径
+    collected/          原始抓取数据
+    ai/                 发给模型的输入 + 模型返回的决策
+    processed/          应用决策后的数据（去重合并后的）
+    digest.html         最终单文件日报的副本
 ```
 
-两个关键设计：
+**四样东西缺一不可**：原始数据、AI 决策、合并后的数据、最终 HTML。前三个是「结论是怎么得出的」的完整证据链，第四个是「当时长什么样」。
 
-1. **先在临时目录构建，全部成功后才原子替换。** 早先的版本「先删旧快照再重建」，一旦 `--force` 后失败就会**销毁已有归档**——这是数据丢失 bug，已修并测试了失败路径。
-2. **快照自包含。** `digest.html` 已内联图片，所以不复制 Telegram 图片池（那个池按 `channel/message_id` 天然追加式，且不按日期）。
+### 核心原则：根目录永远有一份最新日报
+
+归档时 `site/digest.html` 是被 **`copy2` 复制**进快照的，**从不移动、从不删除**。所以：
+
+- 无论何时，`site/digest.html` 都是**最新那一期**，路径固定，可以直接发给别人
+- 下一次 `make all` / `make daily` **允许覆盖**它（这是正常行为，不是事故）
+- 历史期数不会因此丢失——它们各自在 `archive/<day>/digest.html` 里
+
+### 两个安全设计
+
+1. **先在临时目录构建，全部成功后才原子替换。** 早先的版本「先删旧快照再重建」，一旦失败就会**销毁已有归档**——这是数据丢失 bug，已修并测试了失败路径。
+2. **缺产物就报错，不写空快照。** `data/processed/` 或 `site/digest.html` 不存在时直接退出（码 1），而不是归档一个看起来成功的空壳。
+
+### 为什么默认不复用 AI 决策
+
+`archive` 不重跑流水线，所以它不存在这个问题；但 `make all` 会。`ai.reuse` **默认 `false`**，因为决策文件**只对生成它的那一天有效**：
+
+- Telegram 消息 id 会递增，昨天的 id 今天不存在 → 决策静默失效（有警告，但退出码 0）
+- **更危险的是 URL 类条目**（Hacker News、博客、RSS）：帖子在榜上停留多天，URL 不变 ⇒ id 不变 ⇒ **昨天的判断被应用到今天的数据上，零报错**，页面上顶着昨天的头条
+
+所以默认每次都调模型。想省钱可以把 `reuse` 设为 `true`，此时仍会校验 `day`：跨天的文件自动重新生成，只有同一天重跑才复用。
 
 ---
 
@@ -559,7 +599,7 @@ url = "https://example.com/feed.xml"
 make test      # 37 项离线测试，不联网、不调模型
 ```
 
-覆盖：采集解析（Telegram 引用块、图片路径、日期选择）、TLS 校验未被削弱、归档原子替换、AI 决策校验、渲染器报告、配置优先级与校验、后端命令形状、模型溯源覆盖。
+覆盖：采集解析（Telegram 引用块、图片路径、日期选择）、TLS 校验未被削弱、归档原子替换与版本命名、**跨天决策复用校验**、AI 决策校验、渲染器报告、配置优先级与校验、后端命令形状、模型溯源覆盖。
 
 「不联网」是刻意的：每个 fetch 都被合成输入替换，所以测试快（<0.02s）且稳定。
 

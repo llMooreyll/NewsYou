@@ -67,6 +67,23 @@ def write_json(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+def decisions_are_stale(path: Path, day: str) -> bool:
+    """True when an existing decisions file was made for a different day.
+
+    Reuse is keyed on the file existing, which is only sound within one day:
+    yesterday's decisions reference yesterday's item ids. For Telegram those
+    ids vanish (message ids increase) so the stale file is inert, but for
+    anything keyed by URL — Hacker News, blogs, feeds — an item that stays on
+    the list keeps its id, so yesterday's judgement gets applied to today's
+    data with no error at all. Comparing the recorded day closes that gap.
+    """
+    if not path.exists():
+        return False
+    payload = load_json(path)
+    if not payload:
+        return False
+    return payload.get("day") != day
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -106,10 +123,8 @@ def main() -> int:
     args.out = Path(cfg.get("paths.processed"))
     args.ai_timeout = cfg.get("ai.timeout")
     args.ai_model = cfg.get("ai.model") or None
-    ai_extra_args = list(cfg.get("ai.args") or [])
-    # reuse=false in the config is the same intent as --ai-force on the CLI.
-    ai_force = args.ai_force or not cfg.get("ai.reuse", True)
-
+    args.ai_extra_args = list(cfg.get("ai.args") or [])
+    ai_reuse = cfg.get("ai.reuse", False)
     ai_backend, ai_warning = ai_model.resolve_backend(cfg.get("ai.backend"))
     if ai_warning:
         print(f"warning: {ai_warning}", file=sys.stderr)
@@ -122,6 +137,21 @@ def main() -> int:
     day = (load_json(args.collected / "index.json") or {}).get("day") \
         or datetime.now().astimezone().date().isoformat()
 
+    def force_for(path: Path) -> bool:
+        """Regenerate unless the caller asked to reuse a file from this same day.
+
+        `reuse = false` (the default) means always call the model. When reuse is
+        opted into, a file from another day is still regenerated rather than
+        applied to data it was never about.
+        """
+        if args.ai_force or not ai_reuse:
+            return True
+        if decisions_are_stale(path, day):
+            print(f"  ai: {path.name} is for another day; regenerating",
+                  file=sys.stderr)
+            return True
+        return False
+
     processed: dict[str, list[dict]] = {k: list(v) for k, v in results.items()}
     report: dict = {"day": day, "generated_at": datetime.now().astimezone().isoformat()}
 
@@ -133,8 +163,8 @@ def main() -> int:
         report["ai_telegram"] = ai_model.generate(
             ai_backend, args.ai / "telegram_input.json",
             args.ai / "telegram_decisions.json", model=args.ai_model,
-            timeout=args.ai_timeout, force=ai_force, dry_run=args.dry_run,
-            extra_args=ai_extra_args)
+            timeout=args.ai_timeout, force=force_for(args.ai / "telegram_decisions.json"),
+            dry_run=args.dry_run, extra_args=args.ai_extra_args)
 
     tg_decisions_path = args.ai / "telegram_decisions.json"
     tg_decisions = load_json(tg_decisions_path)
@@ -197,8 +227,8 @@ def main() -> int:
         report["ai_digest"] = ai_model.generate(
             ai_backend, args.ai / "digest_input.json",
             args.ai / "digest_decisions.json", model=args.ai_model,
-            timeout=args.ai_timeout, force=ai_force, dry_run=args.dry_run,
-            extra_args=ai_extra_args)
+            timeout=args.ai_timeout, force=force_for(args.ai / "digest_decisions.json"),
+            dry_run=args.dry_run, extra_args=args.ai_extra_args)
 
     digest_decisions_path = args.ai / "digest_decisions.json"
     digest_decisions = load_json(digest_decisions_path)

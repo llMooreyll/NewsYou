@@ -74,7 +74,7 @@ def defaults() -> dict:
             "backend": "pi",
             "model": "deepseek-v4.1-flash",
             "timeout": 900,
-            "reuse": True,
+            "reuse": False,
             "args": [],
         },
         "collect": {

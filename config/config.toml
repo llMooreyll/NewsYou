@@ -23,8 +23,12 @@ model = "deepseek-v4.1-flash"
 # Seconds before a backend call is abandoned.
 timeout = 900
 # Reuse an existing data/ai/*_decisions.json instead of calling the model again.
-# Set false (or pass --ai-force) to force a fresh call.
-reuse = true
+# Default false: every run asks the model afresh, because a decisions file is
+# only valid for the day it was made — yesterday's ids do not describe today's
+# items, and for URL-keyed sources (Hacker News, feeds) a stale file would be
+# applied to the wrong data without any error. Set true to save a call when
+# re-running the same day; a file from another day is still regenerated.
+reuse = false
 # Extra arguments appended to the backend command, just before the prompt.
 # An escape hatch for backend-specific tuning; normally empty.
 args = []

@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Archive one day's run as a self-contained snapshot.
+"""Archive the current run as a self-contained snapshot.
 
-    python tools/archive.py                       # today, full pipeline + AI
-    python tools/archive.py --day 2026-10-13      # a specific day
-    python tools/archive.py --ai-backend none     # no model call
-    python tools/archive.py --force               # overwrite today's snapshot
-    python tools/archive.py --skip-collect        # re-render an existing snapshot
+    python tools/archive.py                  # snapshot today's outputs
+    python tools/archive.py --day 2026-10-13 # name it explicitly
+    python tools/archive.py --force          # replace today's snapshot
 
-Every stage reads config/config.toml; --config forwards a different file to all
-of them so one run never mixes configurations.
+This is a **copy**, not a re-run. It archives whatever the pipeline has already
+produced in the canonical locations:
+
+    data/collected/    raw items, exactly as fetched
+    data/ai/           what was sent to the model and what it decided
+    data/processed/    items after those decisions were applied
+    site/digest.html   the rendered single-file digest
+
+Nothing is moved or deleted. The root digest keeps existing after archiving, so
+there is always a current report at a fixed path, and the next run is free to
+overwrite it. `make daily` is collect + ai + render + this.
 
 Layout:
 
@@ -16,19 +23,19 @@ Layout:
       index.json            manifest of every snapshot (day, counts, engine, backend)
       2026-10-13/
         meta.json           what produced this snapshot and how it went
-        collected/          raw items, never rewritten after collection
-        ai/                 the inputs sent to a model and the decisions it returned
-        processed/          items after the AI decisions were applied
-        digest.html         the rendered single-file digest
+        collected/  ai/  processed/
+        digest.html         a copy of the rendered digest
 
 Two properties this is built around:
 
-- **Nothing is overwritten by accident.** Re-running the same day writes
+- **Nothing is overwritten by accident.** Re-archiving the same day writes
   ``2026-10-13-v2`` instead of clobbering ``2026-10-13``; ``--force`` opts into
-  replacing it.
+  replacing it. The snapshot is assembled in a staging directory and swapped in
+  only once complete, so a failed run cannot destroy the snapshot it was
+  replacing.
 - **The snapshot is readable on its own.** ``digest.html`` inlines its images as
   base64, so it renders without the Telegram media pool. That pool is not copied
-  into the archive: it is already append-only, keyed by channel and message id.
+  in: it is already append-only, keyed by channel and message id.
 """
 from __future__ import annotations
 
@@ -36,7 +43,6 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -46,7 +52,6 @@ TOOLS = ROOT / "tools"
 CST = timezone(timedelta(hours=8))
 
 sys.path.insert(0, str(TOOLS))
-import ai_model  # noqa: E402
 import config  # noqa: E402
 
 def load_json(path: Path):
@@ -59,18 +64,6 @@ def write_json(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8")
-
-def interpreter_for(engine: str) -> str:
-    """modern needs the project venv; legacy runs on any interpreter."""
-    if engine == "modern":
-        for candidate in (ROOT / ".venv/bin/python", ROOT / ".venv/Scripts/python.exe"):
-            if candidate.exists():
-                return str(candidate)
-    return sys.executable
-
-def run(cmd: list[str]) -> int:
-    print(f"$ {' '.join(cmd)}", file=sys.stderr)
-    return subprocess.run(cmd, cwd=ROOT).returncode
 
 def final_name(root: Path, day: str, force: bool) -> Path:
     """Choose the snapshot name without touching the filesystem.
@@ -158,113 +151,63 @@ def main() -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--archive", type=Path, default=None)
     parser.add_argument("--day", default=None,
-                        help="telegram day: auto | today | yesterday | YYYY-MM-DD")
-    parser.add_argument("--fulltext", default=None)
-    parser.add_argument("--engine", default=None, choices=["legacy", "modern"],
-                        help="default: config collect.engine (modern)")
-    parser.add_argument("--ai-backend", default=None,
-                        choices=ai_model.BACKENDS)
-    parser.add_argument("--ai-model", default=None)
-    parser.add_argument("--ai-timeout", type=int, default=None)
+                        help="snapshot name (default: the collected day)")
     parser.add_argument("--force", action="store_true",
-                        help="replace today's snapshot instead of versioning it")
-    parser.add_argument("--skip-collect", action="store_true",
-                        help="reuse an existing snapshot's collected/ data")
+                        help="replace an existing snapshot for the same day")
     config.add_arguments(parser)
     args = parser.parse_args()
 
-    # Resolve once here and forward --config to each stage, so the whole run
-    # agrees on one configuration even when a custom file is passed.
-    cfg = config.resolve_or_exit(args, cli={
-        "archive.root": args.archive,
-        "collect.engine": args.engine,
-        "collect.fulltext": args.fulltext,
-        "telegram.day": args.day,
-        "ai.backend": args.ai_backend,
-        "ai.model": args.ai_model,
-        "ai.timeout": args.ai_timeout,
-    })
+    cfg = config.resolve_or_exit(args, cli={"archive.root": args.archive})
     if config.emit_show_config(cfg, args):
         return 0
 
-    args.archive = Path(cfg.get("archive.root"))
-    args.day = cfg.get("telegram.day")
-    args.fulltext = cfg.get("collect.fulltext")
-    args.ai_backend = cfg.get("ai.backend")
-    args.ai_model = cfg.get("ai.model")
-    args.ai_timeout = cfg.get("ai.timeout")
-    forward_config = ["--config", str(args.config)] if args.config else []
+    root = Path(cfg.get("archive.root"))
+    collected = Path(cfg.get("paths.collected"))
+    aidir = Path(cfg.get("paths.ai"))
+    processed = Path(cfg.get("paths.processed"))
+    digest_html = Path(cfg.get("output.digest"))
 
-    root = args.archive
+    # Refuse to archive a run that is not there, rather than writing an empty
+    # snapshot that looks successful.
+    missing = [str(p) for p in (collected, processed, digest_html) if not p.exists()]
+    if missing:
+        print("nothing to archive; missing:\n  " + "\n  ".join(missing)
+              + "\nrun `make all` first (or use `make daily`)", file=sys.stderr)
+        return 1
+
+    index = load_json(collected / "index.json") or {}
     stamp = datetime.now(CST)
-    day = stamp.date().isoformat() if args.day in ("auto", "today") else args.day
-    if args.day == "yesterday":
-        day = (stamp.date() - timedelta(days=1)).isoformat()
+    if args.day:
+        day = args.day
+    else:
+        day = index.get("day") or stamp.date().isoformat()
 
     root.mkdir(parents=True, exist_ok=True)
 
-    # Build into a staging directory and only swap it in once every step has
-    # succeeded, so a failed run can never leave a half-written snapshot or
-    # destroy the one it was meant to replace.
-    staging: Path | None = None
-    if args.skip_collect:
-        snapshot = root / day
-        if not (snapshot / "collected").exists():
-            print(f"error: {snapshot / 'collected'} does not exist, cannot skip collection",
-                  file=sys.stderr)
-            return 1
-        workdir = snapshot
-    else:
-        staging = root / f".tmp-{day}-{os.getpid()}"
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir(parents=True)
-        workdir = staging
-
-    collected = workdir / "collected"
-    aidir = workdir / "ai"
-    processed = workdir / "processed"
-
-    engine = args.engine or cfg.get("collect.engine") or "modern"
-    python = interpreter_for(engine)
-
+    # Assemble in a staging directory, then swap in, so a failure part-way
+    # through leaves the existing snapshot intact.
+    staging = root / f".tmp-{day}-{os.getpid()}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
     try:
-        if not args.skip_collect:
-            cmd = [python, str(TOOLS / "collect.py"), "--all",
-                   "--outdir", str(collected), "--aidir", str(aidir),
-                   "--fulltext", args.fulltext, "--day", args.day]
-            if args.engine:
-                cmd += ["--engine", args.engine]
-            cmd += forward_config
-            if run(cmd) != 0:
-                return 1
+        for name, source in (("collected", collected), ("ai", aidir),
+                             ("processed", processed)):
+            if source.exists():
+                shutil.copytree(source, staging / name)
+            else:
+                (staging / name).mkdir()
+        # A copy, not a move: the root digest stays put as the current report.
+        shutil.copy2(digest_html, staging / "digest.html")
 
-        cmd = [python, str(TOOLS / "ai_apply.py"),
-               "--collected", str(collected), "--ai", str(aidir),
-               "--out", str(processed),
-               "--ai-backend", args.ai_backend, "--ai-timeout", str(args.ai_timeout)]
-        if args.ai_model:
-            cmd += ["--ai-model", args.ai_model]
-        cmd += forward_config
-        if run(cmd) != 0:
-            return 1
-
-        if run([python, str(TOOLS / "render_digest.py"),
-                "--indir", str(processed), "--fallback", str(collected),
-                "--output", str(workdir / "digest.html"), *forward_config]) != 0:
-            return 1
-
-        if staging is not None:
-            final = final_name(root, day, args.force)
-            if final.name != day:
-                print(f"note: {root / day} exists; writing {final} instead "
-                      f"(use --force to replace)", file=sys.stderr)
-            install_snapshot(staging, final)
-            snapshot = final
+        final = final_name(root, day, args.force)
+        if final.name != day:
+            print(f"note: {root / day} exists; writing {final} instead "
+                  f"(use --force to replace)", file=sys.stderr)
+        install_snapshot(staging, final)
+        snapshot = final
     finally:
-        # On failure the staging directory is discarded, leaving any existing
-        # snapshot untouched.
-        if staging is not None and staging.exists():
+        if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
 
     summary = summarise(snapshot)
@@ -273,13 +216,11 @@ def main() -> int:
         "archived_at": stamp.isoformat(),
         "day": summary["day"] or day,
         "snapshot": str(snapshot),
-        "requested": {
-            "engine": args.engine or "(collector default)",
-            "engine_used": summary.get("engine"),
-            "fulltext": args.fulltext,
-            "ai_backend": args.ai_backend,
-            "ai_model": args.ai_model,
-            "telegram_day": args.day,
+        "source": {
+            "collected": str(collected),
+            "ai": str(aidir),
+            "processed": str(processed),
+            "digest": str(digest_html),
         },
         "summary": summary,
     }
@@ -296,6 +237,7 @@ def main() -> int:
     print(f"  day {meta['day']} · engine {summary.get('engine')} · "
           f"ai {summary.get('ai_backend')} · {summary['item_count']} items · "
           f"{summary['highlights']} highlights", file=sys.stderr)
+    print(f"  root digest kept at {digest_html}", file=sys.stderr)
     print(snapshot / "digest.html")
     return 0
 

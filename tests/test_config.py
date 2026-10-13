@@ -7,6 +7,7 @@ which is exactly the part that differs between them.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -17,7 +18,10 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
+import archive  # noqa: E402
+
 import ai_model  # noqa: E402
+import ai_apply  # noqa: E402
 import config  # noqa: E402
 
 class ConfigLoading(unittest.TestCase):
@@ -187,6 +191,52 @@ class Provenance(unittest.TestCase):
         written = json.loads(out.read_text(encoding="utf-8"))
         self.assertEqual(written["model"], "pi:deepseek-v4.1-flash")
         self.assertEqual(written["model_self_reported"], "some-other-model")
+
+class ReusePolicy(unittest.TestCase):
+    """A decisions file is only valid for the day it was made for.
+
+    Reuse keyed on the file merely existing is unsound across days: for
+    URL-keyed sources an item that stays on the list keeps its id, so
+    yesterday's judgement would be applied to today's data with no error.
+    """
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+
+    def write(self, day: str) -> Path:
+        path = self.dir / "telegram_decisions.json"
+        path.write_text(json.dumps({"schema": "x", "day": day, "actions": []}),
+                        encoding="utf-8")
+        return path
+
+    def test_missing_file_is_not_stale(self):
+        self.assertFalse(ai_apply.decisions_are_stale(self.dir / "nope.json", "2026-10-14"))
+
+    def test_same_day_is_not_stale(self):
+        self.assertFalse(ai_apply.decisions_are_stale(self.write("2026-10-14"), "2026-10-14"))
+
+    def test_other_day_is_stale(self):
+        self.assertTrue(ai_apply.decisions_are_stale(self.write("2026-10-13"), "2026-10-14"))
+
+    def test_unreadable_file_is_not_treated_as_current(self):
+        path = self.dir / "broken.json"
+        path.write_text("not json", encoding="utf-8")
+        self.assertFalse(ai_apply.decisions_are_stale(path, "2026-10-14"))
+
+    def test_reuse_defaults_to_off(self):
+        """The shipped default must call the model on every run."""
+        self.assertIs(config.load(path=None).get("ai.reuse"), False)
+
+
+class ArchiveIsACopy(unittest.TestCase):
+    def test_install_keeps_versions_and_force_replaces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "day").mkdir()
+            self.assertEqual(archive.final_name(root, "day", force=False).name, "day-v2")
+            self.assertEqual(archive.final_name(root, "day", force=True).name, "day")
+            self.assertEqual(archive.final_name(root, "other", force=False).name, "other")
+
 
 if __name__ == "__main__":
     unittest.main()

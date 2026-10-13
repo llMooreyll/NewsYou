@@ -28,7 +28,7 @@ AI_ARG       = $(if $(AI),--ai-backend $(AI),)
 AI_MODEL_ARG = $(if $(AI_MODEL),--ai-model $(AI_MODEL),)
 AI_ARGS      = $(AI_ARG) $(AI_MODEL_ARG)
 
-.PHONY: help setup check test collect ai demo render all ab archive clean config
+.PHONY: help setup check test collect ai demo render all daily ab archive clean config
 
 help:
 	@echo "setup     create .venv and install requirements.txt"
@@ -40,8 +40,9 @@ help:
 	@echo "demo      seed example decisions without a model, then apply them"
 	@echo "render    build site/digest.html"
 	@echo "all       collect + ai + render"
+	@echo "daily     all, then archive a copy of the day (this is the one to run)"
 	@echo "ab        run both engines and write reports/engine-comparison.md"
-	@echo "archive   archive today's run into archive/<day>/"
+	@echo "archive   archive the current outputs without re-running anything"
 	@echo "clean     remove generated data (keeps site/digest.html and archive/)"
 	@echo ""
 	@echo "overrides: CONFIG=$(CONFIG) FULLTEXT= AI= AI_MODEL="
@@ -81,11 +82,17 @@ render:
 
 all: collect ai render
 
+# The everyday command: everything `all` does, then a snapshot of the day.
+# The digest at the root is copied into the archive, never moved, so
+# site/digest.html is always the current report and the next run may overwrite it.
+daily: all archive
+
 ab:
 	$(PY) tools/run_ab.py
 
 archive:
-	$(PY) tools/archive.py $(CONFIG_ARG) $(FULLTEXT_ARG) $(AI_ARGS)
+	$(PY) tools/archive.py $(CONFIG_ARG) $(if $(DAY),--day $(DAY),) \
+		$(if $(FORCE),--force,)
 
 clean:
 	rm -rf data/collected data/ai data/processed \
