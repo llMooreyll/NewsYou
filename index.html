@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>NewsYou — 每日简报</title>
+<!-- The digest itself is written by `make daily` to site/digest.html. This page
+     exists only so the site root is not a 404; it forwards to the current issue
+     and is not regenerated. -->
+<meta http-equiv="refresh" content="0; url=site/digest.html">
+<link rel="canonical" href="site/digest.html">
+<style>
+  :root{--bg:#f7f4ef;--fg:#1b1716;--dim:#6b625b;--accent:#c4291f;--line:#e6dfd5}
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#0c0b0b;--fg:#efeceb;--dim:#8d8480;--accent:#ee5d50;--line:#242020}
+  }
+  html,body{height:100%}
+  body{margin:0;display:grid;place-items:center;background:var(--bg);color:var(--fg);
+       font:16px/1.6 "DB Punct Sans","Inter","SF Pro Text",-apple-system,
+       BlinkMacSystemFont,"Segoe UI","Helvetica Neue","PingFang SC",
+       "Hiragino Sans GB","Microsoft YaHei",sans-serif}
+  main{text-align:center;padding:24px}
+  h1{margin:0 0 6px;font-size:20px;letter-spacing:.01em}
+  p{margin:0 0 18px;color:var(--dim);font-size:14px}
+  a{color:var(--accent);text-decoration:none;font-weight:600;
+    border-bottom:1px solid color-mix(in srgb,var(--accent) 40%,transparent);
+    padding-bottom:1px}
+  a:hover{border-bottom-color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+  <h1>NewsYou</h1>
+  <p>正在打开今日简报…</p>
+  <p><a href="site/digest.html">若没有自动跳转，点此进入 →</a></p>
+</main>
+</body>
+</html>
