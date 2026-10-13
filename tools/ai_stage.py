@@ -34,6 +34,10 @@ from collectors.registry import ORDER, SOURCE_LABELS  # noqa: E402,F401
 TOPICS = ["technology", "ai", "business", "policy", "society", "security",
           "internet", "other"]
 
+# Commercial categories a message can be removed under (op "spam").
+SPAM_CATEGORIES = ("ad", "promo", "giveaway", "crosspromo", "affiliate",
+                   "crypto", "other")
+
 TELEGRAM_SCHEMA = "newsletter.telegram-decisions/1"
 DIGEST_SCHEMA = "newsletter.digest-decisions/1"
 TELEGRAM_INPUT_SCHEMA = "newsletter.telegram-input/1"
@@ -99,6 +103,8 @@ def build_telegram_input(items: list[dict], day: str) -> dict:
             "day": day,
             "model": "string",
             "actions": [
+                {"op": "spam", "id": "string", "category": "ad|promo|giveaway|crosspromo|affiliate|crypto|other",
+                 "reason": "string"},
                 {"op": "drop", "id": "string", "canonical_id": "string", "reason": "string"},
                 {"op": "merge", "primary_id": "string", "merge_ids": ["string"],
                  "title": "string", "summary": "string", "topics": ["string"],
@@ -180,6 +186,7 @@ def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[l
     seen_primary: set[str] = set()
     seen_member: set[str] = set()
     dropped: set[str] = set()
+    removed: set[str] = set()
 
     for index, action in enumerate(decisions.get("actions") or []):
         if not isinstance(action, dict):
@@ -187,7 +194,28 @@ def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[l
             continue
         op = str(action.get("op") or "").lower()
 
-        if op == "drop":
+        if op == "spam":
+            target = action.get("id")
+            if target not in known_ids:
+                problems.append(f"action {index}: unknown id {target!r}")
+                continue
+            if target in seen_member:
+                problems.append(f"action {index}: {target} already merged elsewhere")
+                continue
+            if target in seen_primary:
+                problems.append(f"action {index}: cannot remove a merge primary {target}")
+                continue
+            category = str(action.get("category") or "other").lower()
+            if category not in SPAM_CATEGORIES:
+                problems.append(f"action {index}: unknown spam category {category!r}")
+                category = "other"
+            removed.add(target)
+            accepted.append({
+                "op": "spam", "id": target, "category": category,
+                "reason": _clean_text(action.get("reason"), 200),
+            })
+
+        elif op == "drop":
             target = action.get("id")
             if target not in known_ids:
                 problems.append(f"action {index}: unknown id {target!r}")
@@ -218,6 +246,10 @@ def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[l
             if unknown:
                 problems.append(f"action {index}: unknown merge_ids {unknown}")
                 members = [m for m in members if m in known_ids]
+            blocked = [m for m in members if m in removed]
+            if blocked:
+                problems.append(f"action {index}: merge_ids already removed as ads {blocked}")
+                members = [m for m in members if m not in removed]
             if not members:
                 problems.append(f"action {index}: merge has no valid merge_ids")
                 continue
@@ -226,8 +258,8 @@ def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[l
             if clash:
                 problems.append(f"action {index}: {clash} already used in another merge")
                 continue
-            if primary in dropped:
-                problems.append(f"action {index}: primary {primary} was already dropped")
+            if primary in dropped or primary in removed:
+                problems.append(f"action {index}: primary {primary} was already removed")
                 continue
             members = [m for m in members if m != primary]
             if not members:
@@ -365,11 +397,15 @@ def apply_telegram_decisions(items: list[dict], actions: list[dict]) -> tuple[li
     """
     by_id = {item_id(e): e for e in items}
     dropped: dict[str, dict] = {}
+    removed: dict[str, dict] = {}
     merges: dict[str, dict] = {}
     consumed: set[str] = set()
 
     for action in actions:
-        if action["op"] == "drop":
+        if action["op"] == "spam":
+            removed[action["id"]] = action
+            consumed.add(action["id"])
+        elif action["op"] == "drop":
             dropped[action["id"]] = action
             consumed.add(action["id"])
         elif action["op"] == "merge":
@@ -380,7 +416,7 @@ def apply_telegram_decisions(items: list[dict], actions: list[dict]) -> tuple[li
     for entry in items:
         key = item_id(entry)
 
-        if key in dropped:
+        if key in removed or key in dropped:
             continue
 
         if key in merges:
@@ -438,11 +474,14 @@ def apply_telegram_decisions(items: list[dict], actions: list[dict]) -> tuple[li
 
     report = {
         "dropped": len(dropped),
+        "removed_ads": len(removed),
+        "removed_ad_ids": list(removed),
         "merged_groups": len(merges),
         "merged_members": sum(len(m["merge_ids"]) for m in merges.values()),
         "items_before": len(items),
         "items_after": len(output),
         "drop_details": list(dropped.values()),
+        "ad_details": list(removed.values()),
     }
     return output, report
 

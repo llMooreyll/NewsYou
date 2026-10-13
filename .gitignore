@@ -30,6 +30,10 @@ site/digest-legacy.html
 site/digest-modern.html
 reports/
 
+# Local archive of daily snapshots. Kept on disk for reference, not in version
+# control: it is large, changes every run, and is reproducible from the sources.
+archive/
+
 # Downloaded Telegram images are derived data: the renderer inlines them into
 # site/digest.html as base64, so the shipped artifact is self-contained and the
 # originals do not need version control. They also change on every run, which

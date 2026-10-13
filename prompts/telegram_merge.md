@@ -31,7 +31,42 @@ Each item:
 | `content_hash` | exact-duplicate hash, already used for byte-identical dedupe |
 | `views`, `media`, `reactions` | weak signals only |
 
-## Two operations
+## Three operations
+
+### `spam` — the message is an advertisement, not news
+
+These channels mix editorial posts with commercial ones. Remove the commercial
+ones so they never reach the digest.
+
+```
+{"op": "spam", "id": "<id to remove>", "category": "<category>", "reason": "..."}
+```
+
+Categories (use exactly one):
+
+| category | what it covers |
+|---|---|
+| `ad` | direct product/service advertising, paid placement, 软文 |
+| `promo` | discount codes, sales events, 带货, 优惠券 |
+| `giveaway` | 抽奖, 免费送, follow-and-repost engagement bait |
+| `crosspromo` | promoting another channel, group, or account (互推) |
+| `affiliate` | referral or invite links, 邀请码, 返利 |
+| `crypto` | token, coin, or trading promotion |
+| `other` | commercial content that fits none of the above |
+
+Rules:
+
+- Judge the message as a whole. Remove it only when its **primary purpose is
+  selling or promoting** and it carries no reportable news.
+- **Never remove a message that states a verifiable fact**, even if it also
+  mentions a product. "某公司发布新产品，售价 5999 元" is news, not an ad. A post
+  that only says "限时五折，点击购买" is an ad.
+- Product launches, funding rounds, earnings, and regulatory decisions are news
+  even when they concern a company's own product.
+- A message that merely *links* to a shop is not automatically an ad; a message
+  whose entire content is the shop link is.
+- When in doubt, keep it. A surviving ad is a small annoyance; a deleted news
+  item is a real loss.
 
 ### `drop` — same event, one version is strictly worse
 
@@ -92,6 +127,7 @@ Return **JSON only**, no prose, no markdown fence:
   "day": "2026-10-12",
   "model": "<your model identifier>",
   "actions": [
+    {"op": "spam", "id": "telegram:xhqcankao:32419", "category": "promo", "reason": "限时折扣带货，无新闻事实"},
     {"op": "drop", "id": "telegram:xhqcankao:32420", "canonical_id": "telegram:zaihuapd:44363", "reason": "shorter repost, no unique facts"},
     {"op": "merge", "primary_id": "telegram:zaihuapd:44363", "merge_ids": ["telegram:tnews365:35680"], "title": "…", "summary": "…", "topics": ["ai"], "confidence": "high"}
   ]
@@ -106,5 +142,8 @@ alone.
 1. Never invent facts, numbers, names, or quotes.
 2. Never merge items that share only a topic but not an event.
 3. Never drop an item that contains unique information.
-4. Only reference ids that appear in the input.
-5. When unsure, do nothing. An untouched item is always safe; a wrong merge is not.
+4. Never remove an item that reports a verifiable fact, even a promotional-looking
+   one; `spam` is only for messages whose whole purpose is selling.
+5. Only reference ids that appear in the input.
+6. When unsure, do nothing. An untouched item is always safe; a wrong merge or a
+   wrong removal is not.

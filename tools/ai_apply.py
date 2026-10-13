@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ai_model  # noqa: E402
 import ai_stage  # noqa: E402
 from ai_stage import ORDER  # noqa: E402
 
@@ -73,7 +74,22 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=Path("data/processed"))
     parser.add_argument("--dry-run", action="store_true", help="validate but write nothing")
     parser.add_argument("--report", action="store_true", help="print the applied changes")
+    parser.add_argument("--ai-backend", default=ai_model.DEFAULT_BACKEND,
+                        choices=ai_model.BACKENDS,
+                        help="model backend: none (default, no model call) or pi "
+                             "(local pi CLI in print mode). Passing a real backend "
+                             "is what enables the AI layer")
+    parser.add_argument("--ai-model", default=None,
+                        help="model to pass to the backend, e.g. deepseek-flash")
+    parser.add_argument("--ai-timeout", type=int, default=ai_model.DEFAULT_TIMEOUT,
+                        help="seconds before a backend call is abandoned")
+    parser.add_argument("--ai-force", action="store_true",
+                        help="regenerate decisions even if the file already exists")
     args = parser.parse_args()
+
+    ai_backend, ai_warning = ai_model.resolve_backend(args.ai_backend)
+    if ai_warning:
+        print(f"warning: {ai_warning}", file=sys.stderr)
 
     results, statuses = load_collected(args.collected)
     if not results:
@@ -87,6 +103,15 @@ def main() -> int:
     report: dict = {"day": day, "generated_at": datetime.now().astimezone().isoformat()}
 
     # ---------------- stage 2a: telegram ----------------
+    # If a model backend is selected, ask it for decisions before reading them.
+    # Existing decisions are reused unless --ai-force, so re-running the pipeline
+    # does not spend another model call.
+    if ai_backend != "none":
+        report["ai_telegram"] = ai_model.generate(
+            ai_backend, args.ai / "telegram_input.json",
+            args.ai / "telegram_decisions.json", model=args.ai_model,
+            timeout=args.ai_timeout, force=args.ai_force, dry_run=args.dry_run)
+
     tg_decisions_path = args.ai / "telegram_decisions.json"
     tg_decisions = load_json(tg_decisions_path)
     if tg_decisions and "telegram" in processed:
@@ -102,10 +127,14 @@ def main() -> int:
             "problems": problems,
             **tg_report,
         }
-        print(f"telegram: {tg_report['dropped']} dropped, "
+        print(f"telegram: {tg_report['removed_ads']} ads removed, "
+              f"{tg_report['dropped']} dropped, "
               f"{tg_report['merged_groups']} merged groups "
               f"({tg_report['items_before']} -> {tg_report['items_after']} items), "
               f"{len(problems)} rejected", file=sys.stderr)
+        for ad in tg_report.get("ad_details", [])[:10]:
+            print(f"  - ad [{ad['category']}] {ad['id']}: {ad.get('reason') or ''}",
+                  file=sys.stderr)
         for problem in problems[:10]:
             print(f"  ! {problem}", file=sys.stderr)
         statuses["telegram"] = ai_stage_status(processed["telegram"], statuses.get("telegram", {}))
@@ -139,6 +168,13 @@ def main() -> int:
           f"{len(digest_input['sources'])} sources", file=sys.stderr)
 
     # ---------------- stage 2b: digest ----------------
+    # The input now exists, so a selected backend can be asked for decisions.
+    if ai_backend != "none":
+        report["ai_digest"] = ai_model.generate(
+            ai_backend, args.ai / "digest_input.json",
+            args.ai / "digest_decisions.json", model=args.ai_model,
+            timeout=args.ai_timeout, force=args.ai_force, dry_run=args.dry_run)
+
     digest_decisions_path = args.ai / "digest_decisions.json"
     digest_decisions = load_json(digest_decisions_path)
     index_by_id, aliases = ai_stage.build_item_index(processed)
@@ -180,6 +216,7 @@ def main() -> int:
                 for name, items in processed.items()
             },
             "stage2": {
+                "ai_backend": ai_backend,
                 "telegram": {k: v for k, v in report["telegram"].items() if k != "drop_details"},
                 "digest": report.get("digest"),
             },
