@@ -219,6 +219,18 @@ class TelegramMerge(unittest.TestCase):
         parts = render_digest.telegram_parts(merged)
         self.assertEqual(parts["body"].count("<p>"), 2)
 
+    def test_an_id_of_the_wrong_type_is_rejected_not_raised(self):
+        a, b, _ = self.ids
+        actions, problems = ai_stage.validate_telegram_decisions({"actions": [
+            {"op": "drop", "id": [a, b]},
+            {"op": "spam", "id": [a]},
+            {"op": "drop", "id": b, "canonical_id": {"id": a}},
+            {"op": "merge", "primary_id": [a], "merge_ids": [b], "title": "T", "summary": "S"},
+        ]}, set(self.ids))
+        self.assertEqual([x["op"] for x in actions], ["drop"])
+        self.assertIsNone(actions[0]["canonical_id"])
+        self.assertEqual(len(problems), 4)
+
 
 class RendererReport(unittest.TestCase):
     def test_failed_and_empty_channels_show_in_the_rail(self):

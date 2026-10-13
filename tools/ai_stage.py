@@ -201,6 +201,15 @@ def _clean_text(value, limit: int = 2000, *, keep_paragraphs: bool = False) -> s
     return "\n\n".join(p for p in paras if p)[:limit]
 
 
+def _is_known(ref, known_ids: set[str]) -> bool:
+    """Membership that survives a reference of the wrong type.
+
+    A model sometimes returns a list where one id belongs. A list is unhashable,
+    so a bare `in` against the id set raises instead of rejecting the action.
+    """
+    return isinstance(ref, str) and ref in known_ids
+
+
 def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[list[dict], list[str]]:
     """Return (accepted actions, problems). Never raises on bad input."""
     problems: list[str] = []
@@ -224,7 +233,7 @@ def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[l
 
         if op == "spam":
             target = action.get("id")
-            if target not in known_ids:
+            if not _is_known(target, known_ids):
                 problems.append(f"action {index}: unknown id {target!r}")
                 continue
             if target in seen_member:
@@ -245,7 +254,7 @@ def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[l
 
         elif op == "drop":
             target = action.get("id")
-            if target not in known_ids:
+            if not _is_known(target, known_ids):
                 problems.append(f"action {index}: unknown id {target!r}")
                 continue
             if target in seen_member:
@@ -255,7 +264,7 @@ def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[l
                 problems.append(f"action {index}: cannot drop a merge primary {target}")
                 continue
             canonical = action.get("canonical_id")
-            if canonical is not None and canonical not in known_ids:
+            if canonical is not None and not _is_known(canonical, known_ids):
                 problems.append(f"action {index}: unknown canonical_id {canonical!r}")
                 canonical = None
             dropped.add(target)
@@ -267,7 +276,7 @@ def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[l
         elif op == "merge":
             primary = action.get("primary_id")
             members = [m for m in (action.get("merge_ids") or []) if isinstance(m, str)]
-            if primary not in known_ids:
+            if not _is_known(primary, known_ids):
                 problems.append(f"action {index}: unknown primary_id {primary!r}")
                 continue
             unknown = [m for m in members if m not in known_ids]
