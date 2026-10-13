@@ -75,6 +75,8 @@ ICON = {
     "x": '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg>',
     "out": '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 1.5h5.5V7M8.5 1.5 1.5 8.5"/></svg>',
     "eye": '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2"/></svg>',
+    "sun": '<svg class="sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"/></svg>',
+    "moon": '<svg class="moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M13.5 9.6A5.8 5.8 0 0 1 6.4 2.5a5.8 5.8 0 1 0 7.1 7.1Z"/></svg>',
     "play": '<svg viewBox="0 0 10 10" fill="currentColor"><path d="M2.5 1.5v7l6-3.5z"/></svg>',
 }
 
@@ -444,17 +446,32 @@ def scroller(inner: str, cls: str = "", label: str = "") -> str:
             "</div>")
 
 
-def rail(links: list[tuple[str, str, int | None]], mode: str, heading: str) -> str:
-    """links: (target-or-filter key, label, count)."""
+def _rail_btn(key: str, label: str, count, attr: str, cls: str = "") -> str:
+    return (f'<button class="rail-a{cls}" type="button" {attr}="{esc(key)}" title="{esc(label)}">'
+            f'<span class="lbl">{esc(label)}</span>'
+            + (f'<span class="n">{count}</span>' if count is not None else "")
+            + "</button>")
+
+
+def rail(links: list[tuple], mode: str, heading: str) -> str:
+    """links: (key, label, count) or (key, label, count, children).
+
+    Children are rendered one level down and indented, so the rail mirrors the
+    page outline (e.g. 派早报 > its news items, next to 近期文章).
+    """
     attr = "data-target" if mode == "spy" else "data-filter"
-    items = "".join(
-        f'<button class="rail-a{" on" if i == 0 else ""}" type="button" {attr}="{esc(key)}" title="{esc(label)}">'
-        f'<span class="lbl">{esc(label)}</span>'
-        + (f'<span class="n">{count}</span>' if count is not None else "")
-        + "</button>"
-        for i, (key, label, count) in enumerate(links)
-    )
-    inner = f'<nav class="rail-list" aria-label="{esc(heading)}">{items}<span class="rail-ink"></span></nav>'
+    out = []
+    for i, link in enumerate(links):
+        key, label, count = link[:3]
+        children = link[3] if len(link) > 3 else []
+        cls = " on" if i == 0 else ""
+        if children:
+            subs = "".join(_rail_btn(k, l, c, attr, " sub") for k, l, c in children)
+            out.append(f'<div class="rail-g">{_rail_btn(key, label, count, attr, cls)}'
+                       f'<div class="rail-sub">{subs}</div></div>')
+        else:
+            out.append(_rail_btn(key, label, count, attr, cls))
+    inner = f'<nav class="rail-list" aria-label="{esc(heading)}">{"".join(out)}<span class="rail-ink"></span></nav>'
     return (f'<aside class="rail" data-mode="{mode}"><div class="rail-h">{esc(heading)}</div>'
             f'{scroller(inner)}</aside>')
 
@@ -686,7 +703,7 @@ def _tg_card(entry: dict, index: int, embed: bool, out_dir: Path) -> tuple[str, 
         long = parts["chars"] > 260
         body = f'<div class="tg-b{" clamp" if long else ""}">{parts["body"]}</div>'
         if long:
-            body += '<button class="more" type="button" aria-expanded="false">展开全文</button>'
+            body += f'<button class="more" type="button" aria-haspopup="dialog">展开全文{ICON["out"]}</button>'
 
     tags = ""
     if parts["tags"]:
@@ -903,31 +920,45 @@ def render_linuxdo_panel(items: list[dict]) -> str:
 # --------------------------------------------------------------------------
 
 def render_sspai_panel(items: list[dict]) -> str:
+    """Two sibling sections: 派早报 and 近期文章.
+
+    派早报 holds one or more issues; the news items of an issue are one level
+    below it (indented, on a rule), both on the page and in the rail.
+    """
     features = [e for e in items if "派早报" in (e.get("title") or "") and (e.get("sections") or e.get("body_text"))]
     others = [e for e in items if e not in features]
     secs, links = [], []
 
-    for fi, e in enumerate(features, 1):
-        rich = _use_rich(e)
-        date, tm = stamp(e)
-        sections = [s for s in (e.get("sections") or []) if (s.get("text") or s.get("html"))]
-        head = (f'<header class="feat-h rv"><span class="kicker">派早报</span>'
-                f'<h2>{ext(e.get("url"), esc(e.get("title")))}</h2>'
-                f'<div class="ar-m"><span>{esc(date)} {esc(tm)}</span>'
-                + (f'<span>{esc(e["author"])}</span>' if e.get("author") else "")
-                + f'<span>{len(sections) or 1} 条</span></div></header>')
-        secs.append(f'<section class="sec" id="sp-f{fi}">{head}</section>')
-        links.append((f"sp-f{fi}", "派早报" if len(features) == 1 else f"派早报 {fi}", None))
-        if sections:
+    if features:
+        issues, children = [], []
+        for fi, e in enumerate(features, 1):
+            rich = _use_rich(e)
+            date, tm = stamp(e)
+            sections = [s for s in (e.get("sections") or []) if (s.get("text") or s.get("html"))]
+            head = (f'<header class="feat-h rv"><h3>{ext(e.get("url"), esc(e.get("title")))}</h3>'
+                    f'<div class="ar-m"><span>{esc(date)} {esc(tm)}</span>'
+                    + (f'<span>{esc(e["author"])}</span>' if e.get("author") else "")
+                    + f'<span>{len(sections) or 1} 条</span></div></header>')
+            blocks = []
             for si, s in enumerate(sections, 1):
                 sid = f"sp-f{fi}-{si}"
                 title = s.get("title") or f"第 {si} 条"
-                secs.append(f'<section class="sec blk rv" style="--i:{si}" id="{sid}">'
-                            f'<h3 class="blk-h"><span class="no">{si:02d}</span>{esc(title)}</h3>'
-                            f'<div class="prose">{body_fragment(s, rich)}</div></section>')
-                links.append((sid, title, None))
-        else:
-            secs.append(f'<section class="sec blk"><div class="prose">{body_fragment(e, rich)}</div></section>')
+                blocks.append(f'<section class="sec blk rv" style="--i:{si}" id="{sid}">'
+                              f'<h4 class="blk-h"><span class="no">{si:02d}</span>{esc(title)}</h4>'
+                              f'<div class="prose">{body_fragment(s, rich)}</div></section>')
+                if len(features) == 1:
+                    children.append((sid, title, None))
+            if not sections:
+                blocks.append(f'<section class="blk"><div class="prose">{body_fragment(e, rich)}</div></section>')
+            if len(features) > 1:
+                children.append((f"sp-f{fi}", f"{date} {tm}".strip() or f"第 {fi} 期", len(sections) or None))
+            issues.append(f'<div class="sec feat-issue" id="sp-f{fi}">{head}'
+                          f'<div class="feat-items">{"".join(blocks)}</div></div>')
+        total = sum(len(e.get("sections") or []) or 1 for e in features)
+        aside = f'<span class="aside">{len(features)} 期</span>' if len(features) > 1 else ""
+        secs.append(f'<section class="sec" id="sp-brief"><h2 class="sec-h">派早报<span class="n">{total}</span>{aside}</h2>'
+                    f'{"".join(issues)}</section>')
+        links.append(("sp-brief", "派早报", total, children))
 
     if others:
         secs.append(f'<section class="sec" id="sp-others"><h2 class="sec-h">近期文章<span class="n">{len(others)}</span></h2>'
@@ -935,7 +966,7 @@ def render_sspai_panel(items: list[dict]) -> str:
         links.append(("sp-others", "近期文章", len(others)))
 
     content = f'<div class="feat">{"".join(secs)}</div>'
-    return with_rail(rail(links, "spy", "目录"), content) if len(links) > 1 else content
+    return with_rail(rail(links, "spy", "目录"), content) if len(links) > 1 or (links and links[0][3:]) else content
 
 
 # --------------------------------------------------------------------------
@@ -947,10 +978,15 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#0b0b0c">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0c0b0b">
 <title>__TITLE__</title>
-<script>document.documentElement.classList.add("js")</script>
+<script>
+(function(d){var r=d.documentElement,t=null,f=null;r.classList.add("js");
+try{t=localStorage.getItem("digest-theme");f=localStorage.getItem("digest-cjk-serif")}catch(e){}
+if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";
+r.dataset.theme=t;if(f==="0")r.classList.add("no-cjk-serif")})(document);
+</script>
 <style>__CSS__</style>
 </head>
 <body>
@@ -961,6 +997,7 @@ PAGE = """<!doctype html>
       <span class="hd-date">__DATE__</span>
       <span class="hd-stats">__STATS__</span>
       <span class="hd-keys"><kbd>1</kbd>–<kbd>9</kbd> 切换 <kbd>←</kbd><kbd>→</kbd> 翻页</span>
+      <button class="theme-btn" type="button" aria-label="切换主题">__SUN____MOON__</button>
     </div>
     __TABS__
   </div>
@@ -970,12 +1007,14 @@ PAGE = """<!doctype html>
   <span>本地生成 <code>__GENERATED__</code></span>
   <span>每条保留原始链接与时间戳；「AI 合并」条目可对照原始消息</span>
 </footer>
-<div class="ov" id="ov" aria-hidden="true" role="dialog" aria-modal="true" aria-label="详情">
-  <div class="ov-p">
-    <div class="ov-h"><h2></h2><button class="ov-x" type="button" aria-label="关闭">__X__</button></div>
+<div class="ov" id="ov" aria-hidden="true"></div>
+<template id="ov-panel">
+  <div class="ov-p" role="dialog" aria-modal="true">
+    <div class="ov-h"><button class="ov-back" type="button" aria-label="返回">__BACK__<span>返回</span></button><h2></h2>
+      <button class="ov-x" type="button" aria-label="关闭">__X__</button></div>
     <div class="ov-b"></div>
   </div>
-</div>
+</template>
 <script>__JS__</script>
 </body>
 </html>
@@ -1054,6 +1093,9 @@ def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: b
             .replace("__STATS__", stats)
             .replace("__TABS__", tab_html)
             .replace("__X__", ICON["x"])
+            .replace("__BACK__", ICON["l"])
+            .replace("__SUN__", ICON["sun"])
+            .replace("__MOON__", ICON["moon"])
             .replace("__GENERATED__", esc(datetime.now(CST).strftime("%Y-%m-%d %H:%M")))
             .replace("__PANELS__", "".join(panels)))
 

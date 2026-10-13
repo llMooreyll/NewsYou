@@ -147,10 +147,16 @@
     if (instant) { void bar.offsetWidth; bar.style.transition = ''; }
   }
   function setRail(rail, link, instant) {
-    $$('.rail-a', rail).forEach(function (a) { a.classList.toggle('on', a === link); });
-    railInk(rail, link, instant);
+    $$('.rail-a', rail).forEach(function (a) { a.classList.toggle('on', a === link); a.classList.remove('in'); });
+    /* a sub-item lights up its parent; on mobile subs are hidden, so the
+       parent also carries the ink */
+    var group = link.closest('.rail-g');
+    var parent = group && group.querySelector(':scope > .rail-a');
+    if (parent && parent !== link) parent.classList.add('in');
+    var target = link.offsetParent === null && parent ? parent : link;
+    railInk(rail, target, instant);
     var track = rail.querySelector('.scroller-track');
-    if (track && track.scrollWidth > track.clientWidth) revealIn(track, link);
+    if (track && track.scrollWidth > track.clientWidth) revealIn(track, target);
   }
 
   var spyLock = 0;
@@ -248,56 +254,80 @@
   });
 
   /* ------------------------------------------------------------------
-   * telegram long-post clamp, animated with a measured max-height
+   * telegram long posts: the card keeps its clamped preview, the full post
+   * opens in the overlay (same dialog as the merged originals), so the
+   * masonry never reflows
    * ------------------------------------------------------------------ */
+  function readerFor(card) {
+    var node = card.cloneNode(true);
+    node.removeAttribute('data-ch');
+    node.removeAttribute('hidden');
+    node.removeAttribute('style');
+    node.classList.remove('pop');
+    node.classList.add('rd');
+    $$('.more', node).forEach(function (m) { m.remove(); });
+    $$('.clamp', node).forEach(function (c) { c.classList.remove('clamp'); c.style.maxHeight = ''; });
+    return node;
+  }
   doc.addEventListener('click', function (e) {
     var btn = e.target.closest('.more');
     if (!btn) return;
-    var box = btn.parentNode.querySelector('.clamp');
-    if (!box) return;
-    var open = box.classList.contains('open');
-    if (!open) {
-      box.style.maxHeight = box.scrollHeight + 'px';
-      box.classList.add('open');
-      btn.textContent = '收起';
-      var done = function () { if (box.classList.contains('open')) box.style.maxHeight = 'none'; box.removeEventListener('transitionend', done); };
-      box.addEventListener('transitionend', done);
-    } else {
-      box.style.maxHeight = box.scrollHeight + 'px';
-      void box.offsetHeight;
-      box.classList.remove('open');
-      box.style.maxHeight = '';
-      btn.textContent = '展开全文';
-      var card = box.closest('.tg');
-      var t = card.getBoundingClientRect().top - headH() - 12;
-      if (t < 0) win.scrollBy({ top: t, behavior: reduce ? 'auto' : 'smooth' });
-    }
-    btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+    var card = btn.closest('.tg');
+    if (!card) return;
+    var ch = card.querySelector('.tg-ch');
+    openOv(readerFor(card), (ch ? ch.textContent + ' · ' : '') + '全文');
   });
 
   /* ------------------------------------------------------------------
-   * overlay: merged originals and the image lightbox
+   * overlay: a stack of panels (full post, merged originals, image).
+   * Opening from inside a panel pushes a new one on top; ×, Esc and the
+   * backdrop close only the top panel and return to the one beneath.
    * ------------------------------------------------------------------ */
-  var ov = $('#ov'), ovBody = ov && $('.ov-b', ov), ovTitle = ov && $('.ov-h h2', ov), lastFocus = null;
+  var ov = $('#ov'), panelTpl = $('#ov-panel'), stack = [];
+  var LEAVE_MS = 420;
+  function topPanel() { return stack.length ? stack[stack.length - 1] : null; }
   function openOv(node, title, isImg) {
-    if (!ov) return;
-    lastFocus = doc.activeElement;
-    ovBody.innerHTML = '';
-    ovBody.appendChild(node);
-    ovTitle.textContent = title || '';
-    ov.classList.toggle('img', !!isImg);
-    ov.classList.add('open');
-    ov.setAttribute('aria-hidden', 'false');
-    doc.body.style.overflow = 'hidden';
-    ovBody.scrollTop = 0;
-    var x = $('.ov-x', ov); if (x) x.focus({ preventScroll: true });
+    if (!ov || !panelTpl) return;
+    var panel = panelTpl.content.firstElementChild.cloneNode(true);
+    panel.querySelector('.ov-h h2').textContent = title || '';
+    panel.setAttribute('aria-label', title || '详情');
+    panel.querySelector('.ov-b').appendChild(node);
+    if (isImg) panel.classList.add('img');
+    var under = topPanel();
+    if (under) {
+      under.el.classList.add('covered');
+      under.el.setAttribute('aria-hidden', 'true');
+      panel.classList.add('child');
+    }
+    stack.push({ el: panel, from: doc.activeElement });
+    ov.appendChild(panel);
+    if (stack.length === 1) {
+      ov.classList.add('open');
+      ov.setAttribute('aria-hidden', 'false');
+      doc.body.style.overflow = 'hidden';
+    }
+    void panel.offsetWidth;                 /* commit the start state */
+    panel.classList.add('on');
+    var x = panel.querySelector('.ov-x');
+    if (x) x.focus({ preventScroll: true });
   }
   function closeOv() {
-    if (!ov || !ov.classList.contains('open')) return;
-    ov.classList.remove('open');
-    ov.setAttribute('aria-hidden', 'true');
-    doc.body.style.overflow = '';
-    if (lastFocus && lastFocus.focus) lastFocus.focus({ preventScroll: true });
+    var top = stack.pop();
+    if (!top) return;
+    var el = top.el;
+    el.classList.remove('on');
+    el.classList.add('leaving');
+    setTimeout(function () { el.remove(); }, reduce ? 0 : LEAVE_MS);
+    var under = topPanel();
+    if (under) {
+      under.el.classList.remove('covered');
+      under.el.removeAttribute('aria-hidden');
+    } else {
+      ov.classList.remove('open');
+      ov.setAttribute('aria-hidden', 'true');
+      doc.body.style.overflow = '';
+    }
+    if (top.from && top.from.focus && doc.contains(top.from)) top.from.focus({ preventScroll: true });
   }
   doc.addEventListener('click', function (e) {
     var trig = e.target.closest('[data-ov]');
@@ -307,13 +337,26 @@
       return;
     }
     var img = e.target.closest('.shots img');
-    if (img) {
+    if (img && !img.closest('.ov')) {
       var big = doc.createElement('img');
       big.src = img.src; big.alt = img.alt || '';
       openOv(big, '', true);
       return;
     }
-    if (e.target.closest('.ov-x') || e.target === ov || (ov && ov.classList.contains('img') && e.target.closest('.ov-b'))) closeOv();
+    if (!ov || !stack.length) return;
+    var top = topPanel().el;
+    if (e.target.closest('.ov-x, .ov-back')) { if (e.target.closest('.ov-p') === top) closeOv(); return; }
+    if (e.target === ov) { closeOv(); return; }
+    if (top.classList.contains('img') && e.target.closest('.ov-b') && top.contains(e.target)) closeOv();
+  });
+  /* keep Tab inside the top panel */
+  doc.addEventListener('keydown', function (e) {
+    if (e.key !== 'Tab' || !stack.length) return;
+    var f = $$('a[href],button:not([disabled])', topPanel().el).filter(function (n) { return n.offsetParent !== null; });
+    if (!f.length) return;
+    var first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && doc.activeElement === first) { last.focus(); e.preventDefault(); }
+    else if (!e.shiftKey && doc.activeElement === last) { first.focus(); e.preventDefault(); }
   });
 
   /* ------------------------------------------------------------------
@@ -321,7 +364,7 @@
    * ------------------------------------------------------------------ */
   doc.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') { closeOv(); return; }
-    if (ov && ov.classList.contains('open')) return;
+    if (stack.length) return;
     var tag = (e.target.tagName || '').toUpperCase();
     if (tag === 'INPUT' || tag === 'TEXTAREA' || e.metaKey || e.ctrlKey || e.altKey) return;
     var i = tabs.findIndex(function (t) { return t.dataset.tab === current; });
@@ -331,6 +374,70 @@
     if (n >= 1 && n <= 9 && tabs[n - 1]) show(tabs[n - 1].dataset.tab);
     else if (n === 0 && tabs[9]) show(tabs[9].dataset.tab);
   });
+
+  /* ------------------------------------------------------------------
+   * theme: system by default, manual choice persisted. The initial value
+   * is set by an inline script in <head> so there is no flash.
+   * ------------------------------------------------------------------ */
+  var THEME_KEY = 'digest-theme';
+  var themeBtn = $('.theme-btn');
+  function applyTheme(t) {
+    root.dataset.theme = t;
+    var meta = $('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', getComputedStyle(root).getPropertyValue('--bg').trim());
+    if (themeBtn) themeBtn.setAttribute('aria-label', t === 'dark' ? '切换到浅色' : '切换到深色');
+  }
+  if (themeBtn) {
+    applyTheme(root.dataset.theme || 'dark');
+    themeBtn.addEventListener('click', function () {
+      var next = root.dataset.theme === 'dark' ? 'light' : 'dark';
+      try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+      themeBtn.classList.add('spin');
+      setTimeout(function () { themeBtn.classList.remove('spin'); }, 420);
+      if (doc.startViewTransition && !reduce) {
+        doc.startViewTransition(function () { applyTheme(next); });
+      } else {
+        root.classList.add('theming');
+        applyTheme(next);
+        setTimeout(function () { root.classList.remove('theming'); }, 450);
+      }
+    });
+  }
+  /* follow the OS while the user has not chosen */
+  if (win.matchMedia) {
+    var mq = win.matchMedia('(prefers-color-scheme: light)');
+    var onSys = function (e) {
+      var saved = null;
+      try { saved = localStorage.getItem(THEME_KEY); } catch (err) {}
+      if (!saved) applyTheme(e.matches ? 'light' : 'dark');
+    };
+    if (mq.addEventListener) mq.addEventListener('change', onSys);
+  }
+
+  /* ------------------------------------------------------------------
+   * CJK serif detection. Latin serif next to CJK sans looks broken, so
+   * when no decent CJK serif is installed the serif stack becomes sans.
+   * The result is cached so later visits apply it before first paint.
+   * ------------------------------------------------------------------ */
+  (function detectSerif() {
+    if (!win.FontFace || !doc.fonts) return;
+    var names = ['Songti SC Regular', 'STSongti-SC-Regular', 'Songti SC', 'Noto Serif CJK SC', 'Noto Serif CJK SC Regular',
+                 'NotoSerifCJKsc-Regular', 'Source Han Serif SC', 'Source Han Serif SC Regular', 'SourceHanSerifSC-Regular',
+                 'Noto Serif SC', 'NotoSerifSC-Regular', 'STSong'];
+    var src = names.map(function (n) { return 'local("' + n + '")'; }).join(',');
+    var face;
+    try { face = new FontFace('DB Serif Probe', src); } catch (e) { return; }
+    face.load().then(function () { set(true); }, function () { set(false); });
+    function set(ok) {
+      root.classList.toggle('no-cjk-serif', !ok);
+      try { localStorage.setItem('digest-cjk-serif', ok ? '1' : '0'); } catch (e) {}
+      setTimeout(function () {
+        moveInk(tabs.find(function (t) { return t.dataset.tab === current; }), true);
+        var p = current && panelOf(current);
+        if (p) layoutMasonry(p, true);
+      }, 30);
+    }
+  })();
 
   /* ------------------------------------------------------------------
    * boot

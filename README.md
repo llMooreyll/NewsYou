@@ -105,7 +105,7 @@ No `api_id`, no login, no bot — the public `t.me/s/` preview, paged backwards 
 python tools/render_digest.py --indir data/collected --output site/digest.html
 ```
 
-Dark only, one warm accent, hairline rules. Tabs sit in one scrollable row with edge fades and arrows on the side that hides tabs; keyboard `1–9`, `←` `→`. Hacker News / 微博 / 知乎 render as dense ranked boards (rank, title, heat bar, numbers in aligned columns). Telegram is a reading-order masonry with a channel filter rail; linux.do, 少数派 and the digest get a scroll-spy side rail. Styles and script live in `tools/digest_assets/` and are inlined at render time, so the output is still one file.
+Light and dark themes (system default, manual toggle remembered), one red accent, hairline rules; serif for headlines and long-form text, sans for lists and cards. Tabs sit in one scrollable row with edge fades and arrows on the side that hides tabs; keyboard `1–9`, `←` `→`. Hacker News / 微博 / 知乎 render as dense ranked boards (rank, title, heat bar, numbers in aligned columns). Telegram is a reading-order masonry with a channel filter rail; linux.do, 少数派 and the digest get a scroll-spy side rail. Styles and script live in `tools/digest_assets/` and are inlined at render time, so the output is still one file.
 
 ### The reserved AI step
 
