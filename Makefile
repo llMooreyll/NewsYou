@@ -3,16 +3,19 @@
 # The venv keeps the system Python untouched. `make setup` is the only step that
 # needs the network for packages; everything else just talks to the sources.
 #
-# The AI layer is off by default. Enable it with AI=pi:
+# The AI layer is on by default: stage 2 calls the pi CLI with deepseek-v4.1-flash.
+# Turn it off with AI=none (no model call at all).
 #
-#   make all AI=pi AI_MODEL=deepseek-flash
-#   make archive AI=pi
+#   make all                          # collect + AI (pi/deepseek-v4.1-flash) + render
+#   make all AI=none                  # no model call
+#   make all AI_MODEL=deepseek-flash  # different model
+#   make archive
 
 PY       ?= ./.venv/bin/python
 PY_SYS   ?= python3
 FULLTEXT ?= today
-AI       ?= none
-AI_MODEL ?=
+AI       ?= pi
+AI_MODEL ?= deepseek-v4.1-flash
 
 .PHONY: help setup check test collect ai demo render all ab archive clean
 
@@ -21,12 +24,12 @@ help:
 	@echo "check     verify the pipeline imports and both engines resolve"
 	@echo "test      run the offline regression tests"
 	@echo "collect   fetch every source into data/collected"
-	@echo "ai        apply stage-2 decisions (AI=pi to call the model, default none)"
+	@echo "ai        apply stage-2 decisions (AI=pi by default, AI=none to skip)"
 	@echo "demo      seed example decisions without a model, then apply them"
 	@echo "render    build site/digest.html"
 	@echo "all       collect + ai + render"
 	@echo "ab        run both engines and write reports/engine-comparison.md"
-	@echo "archive   archive today's run into archive/<day>/ (AI=pi to use the model)"
+	@echo "archive   archive today's run into archive/<day>/ (AI=none to skip the model)"
 	@echo "clean     remove generated data (keeps site/digest.html and archive/)"
 
 setup:

@@ -42,6 +42,9 @@ ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
 CST = timezone(timedelta(hours=8))
 
+sys.path.insert(0, str(TOOLS))
+import ai_model  # noqa: E402
+
 ARCHIVE_DEFAULT = Path("archive")
 
 def load_json(path: Path):
@@ -157,8 +160,9 @@ def main() -> int:
     parser.add_argument("--fulltext", default="today")
     parser.add_argument("--engine", default=None, choices=["legacy", "modern"],
                         help="default: the collector's own default (modern)")
-    parser.add_argument("--ai-backend", default="none", choices=["none", "pi"])
-    parser.add_argument("--ai-model", default=None)
+    parser.add_argument("--ai-backend", default=ai_model.DEFAULT_BACKEND,
+                        choices=ai_model.BACKENDS)
+    parser.add_argument("--ai-model", default=ai_model.DEFAULT_MODEL)
     parser.add_argument("--ai-timeout", type=int, default=900)
     parser.add_argument("--force", action="store_true",
                         help="replace today's snapshot instead of versioning it")

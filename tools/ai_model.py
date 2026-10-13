@@ -4,9 +4,10 @@
 The pipeline never talks to a model API directly. It shells out to a local CLI,
 so credentials and model choice stay in the user's own tool configuration.
 
-    none   (default) no model call at all — the pipeline runs end to end and the
-           digest simply has no AI layer
-    pi     the local `pi` CLI in non-interactive print mode
+    pi     (default) the local `pi` CLI in non-interactive print mode, using
+           DEFAULT_MODEL unless --ai-model says otherwise
+    none   no model call at all — the pipeline runs end to end and the digest
+           simply has no AI layer
 
 Only `pi` is implemented. Adding another backend means adding one entry to
 BACKENDS and one branch in `_invoke`; nothing else in the pipeline changes,
@@ -39,7 +40,8 @@ import sys
 from pathlib import Path
 
 BACKENDS = ("none", "pi")
-DEFAULT_BACKEND = "none"
+DEFAULT_BACKEND = "pi"
+DEFAULT_MODEL = "deepseek-v4.1-flash"
 
 # The instruction passed as an argument. Deliberately short: the full prompt is
 # the `instructions` field inside the input JSON.
@@ -198,6 +200,18 @@ def generate(backend: str, input_path: Path, output_path: Path, *,
             print(f"  ! ai output was not JSON; first 200 chars: {raw[:200]!r}",
                   file=sys.stderr)
         return report
+
+    # Provenance: the decisions file must say what actually produced it. Models
+    # routinely self-report an identity — deepseek-v4.1-flash answers as
+    # "claude-sonnet-4.5" — so the claim is kept for audit but the recorded
+    # model is the one we really invoked. Filling only when empty is not enough:
+    # a wrong-but-present value would survive and end up printed in the digest.
+    claimed = str(parsed.get("model") or "").strip()
+    actual = f"{backend}:{model}" if model else backend
+    if claimed and claimed != actual:
+        parsed["model_self_reported"] = claimed
+    parsed["model"] = actual
+    report["model_filled"] = actual
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(parsed, ensure_ascii=False, indent=2) + "\n",

@@ -76,11 +76,12 @@ def main() -> int:
     parser.add_argument("--report", action="store_true", help="print the applied changes")
     parser.add_argument("--ai-backend", default=ai_model.DEFAULT_BACKEND,
                         choices=ai_model.BACKENDS,
-                        help="model backend: none (default, no model call) or pi "
-                             "(local pi CLI in print mode). Passing a real backend "
-                             "is what enables the AI layer")
-    parser.add_argument("--ai-model", default=None,
-                        help="model to pass to the backend, e.g. deepseek-flash")
+                        help=f"model backend: pi (default, local pi CLI in print "
+                             f"mode) or none (no model call). "
+                             f"Default model: {ai_model.DEFAULT_MODEL}")
+    parser.add_argument("--ai-model", default=ai_model.DEFAULT_MODEL,
+                        help="model to pass to the backend; pass '' to let the "
+                             "backend pick its own default")
     parser.add_argument("--ai-timeout", type=int, default=ai_model.DEFAULT_TIMEOUT,
                         help="seconds before a backend call is abandoned")
     parser.add_argument("--ai-force", action="store_true",
