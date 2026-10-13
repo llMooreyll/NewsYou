@@ -80,9 +80,9 @@ def main() -> int:
     parser.add_argument("--outdir", type=Path, default=Path("data/collected"))
     parser.add_argument("--aidir", type=Path, default=Path("data/ai"),
                         help="where stage 2 input files are written")
-    parser.add_argument("--engine", default=ex.DEFAULT_ENGINE, choices=ex.ENGINES,
-                        help="extraction engine: modern (trafilatura/feedparser, default) "
-                             "or legacy (standard library only)")
+    parser.add_argument("--engine", default=None, choices=ex.ENGINES,
+                        help=f"extraction engine: modern (trafilatura/feedparser, "
+                             f"default) or legacy (standard library only)")
     parser.add_argument("--date", default=None, help="linuxdo issue date")
     parser.add_argument("--day", default="auto", help="telegram day: today | yesterday | auto | YYYY-MM-DD")
     parser.add_argument("--pages", type=int, default=4, help="telegram pages per channel")
@@ -100,13 +100,15 @@ def main() -> int:
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
 
-    ok, reason = ex.engine_available(args.engine)
-    if not ok:
-        print(f"error: {reason}", file=sys.stderr)
-        return 2
-    engine, warning = ex.resolve_engine(args.engine)
+    # An explicitly requested engine is honoured or fails; the default may fall
+    # back, so a bare checkout still runs. resolve_engine only falls back when
+    # the request came from the default, which is why None is meaningful here.
+    requested = args.engine if args.engine is not None else ex.DEFAULT_ENGINE
+    engine, warning = ex.resolve_engine(requested, allow_fallback=args.engine is None)
     if warning:
         print(f"warning: {warning}", file=sys.stderr)
+        if engine == requested:        # no fallback happened: this is fatal
+            return 2
     args.engine = engine
 
     if args.list_sources:
