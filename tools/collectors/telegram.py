@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""Telegram public channels — the generic adapter.
+
+Uses Telegram's public web preview at https://t.me/s/<channel>: no API key, no
+login, no bot. Works for PUBLIC channels only. Adding a channel is one string in
+CHANNELS; nothing else changes.
+
+First page:   latest ~20 posts
+Older pages:  ?before=<lowest message id already seen>
+
+This module also owns post parsing (``parse_posts``) and image downloading, so
+``tools/telegram_preview.py`` can stay a thin command-line wrapper.
+"""
+from __future__ import annotations
+
+import html as html_mod
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+from . import base
+from .base import CST, UA, FetchError
+
+SOURCE = "telegram"
+
+CHANNELS = [
+    "MaiTungNews",
+    "tnews365",
+    "zaihuapd",
+    "xhqcankao",
+    "GodlyNews1",
+    "NewlearnerChannel",
+    "DNSPODT",
+]
+
+DEFAULT_MEDIA_ROOT = Path("data/telegram/media")
+
+class PreviewError(RuntimeError):
+    pass
+
+# --------------------------------------------------------------------------
+# Parsing patterns
+# --------------------------------------------------------------------------
+
+MESSAGE_SPLIT = re.compile(r'(?=<div class="tgme_widget_message\b)')
+POST_ID = re.compile(r'data-post="([^"]+)"')
+DATE = re.compile(r'<time[^>]+datetime="([^"]+)"')
+VIEWS = re.compile(r'tgme_widget_message_views">([^<]+)<')
+AUTHOR = re.compile(r'tgme_widget_message_author[^>]*>(.*?)</a>', re.S)
+TEXT_DIV = re.compile(
+    r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>\s*'
+    r'(?:<div class="tgme_widget_message_(?:footer|reply_markup)|</div>)',
+    re.S,
+)
+REACTIONS_BLOCK = re.compile(r'<div class="tgme_widget_message_reactions.*?</div>', re.S)
+REACTION = re.compile(
+    r'<span class="tgme_reaction"><i class="emoji"[^>]*><b>([^<]+)</b></i>([^<]*)</span>'
+)
+EMOJI_ASSET = re.compile(r'^//telegram\.org/img/emoji/')
+
+PHOTO_TAG = re.compile(r'<a class="tgme_widget_message_photo_wrap[^>]*>', re.S)
+VIDEO_THUMB_TAG = re.compile(r'<a class="tgme_widget_message_video_thumb[^>]*>', re.S)
+STICKER_TAG = re.compile(r'<div class="tgme_widget_message_sticker[^"]*"[^>]*>', re.S)
+STYLE_URL = re.compile(r"background-image:url\('([^']+)'\)")
+VIDEO_SRC = re.compile(r'<video[^>]+src="([^"]+)"')
+DOC_TITLE = re.compile(r'tgme_widget_message_document_title[^>]*>([^<]+)<')
+LINK_PREVIEW_TAG = re.compile(r'<a class="tgme_widget_message_link_preview[^>]*>', re.S)
+IMG_SRC = re.compile(r'<img[^>]+src="([^"]+)"')
+
+MEDIA_MARKERS = {
+    "photo": "tgme_widget_message_photo_wrap",
+    "video": "tgme_widget_message_video_wrap",
+    "video_message": "tgme_widget_message_roundvideo",
+    "document": "tgme_widget_message_document_wrap",
+    "voice": "tgme_widget_message_voice",
+    "audio": "tgme_widget_message_audio",
+    "poll": "tgme_widget_message_poll",
+    "sticker": "tgme_widget_message_sticker",
+    "link_preview": "tgme_widget_message_link_preview",
+    "forwarded": "tgme_widget_message_forwarded_from",
+    "reply": "tgme_widget_message_reply",
+    "pinned": "tgme_widget_message_pinned",
+}
+
+CONTENT_TYPE_EXT = {
+    "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png",
+    "image/webp": ".webp", "image/gif": ".gif", "video/mp4": ".mp4",
+}
+
+# --------------------------------------------------------------------------
+# HTTP
+# --------------------------------------------------------------------------
+
+def fetch(url: str, timeout: int = 25, retries: int = 2) -> str:
+    last: Exception | None = None
+    for attempt in range(retries + 1):
+        request = urllib.request.Request(
+            url, headers={"User-Agent": UA, "Accept-Language": "en,zh;q=0.8"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read().decode("utf-8", "replace")
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last = exc
+            if attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+    raise PreviewError(f"could not fetch {url}: {last}")
+
+def fetch_bytes(url: str, timeout: int) -> tuple[bytes, str]:
+    request = urllib.request.Request(url, headers={
+        "User-Agent": UA,
+        "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+        "Referer": "https://t.me/",
+    })
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read(), response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+
+# --------------------------------------------------------------------------
+# Parsing
+# --------------------------------------------------------------------------
+
+def strip_tags(fragment: str) -> str:
+    fragment = re.sub(r'<br\s*/?>', '\n', fragment)
+    fragment = re.sub(r'</p>\s*<p[^>]*>', '\n\n', fragment)
+    fragment = re.sub(r'<[^>]+>', '', fragment)
+    text = html_mod.unescape(fragment)
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+def normalize_url(url: str) -> str:
+    return "https:" + url if url.startswith("//") else url
+
+def style_urls(tags: list[str]) -> list[str]:
+    urls = []
+    for tag in tags:
+        match = STYLE_URL.search(tag)
+        if match:
+            urls.append(normalize_url(match.group(1)))
+    return urls
+
+def dedupe(values) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+def parse_reactions(block: str) -> list[dict]:
+    reactions = []
+    for emoji, count in REACTION.findall(block):
+        count_text = count.strip().replace("\u00a0", "")
+        try:
+            value = int(count_text)
+        except ValueError:
+            value = None
+        reactions.append({"emoji": emoji.strip(), "count": value})
+    return reactions
+
+def parse_posts(page_html: str) -> list[dict]:
+    """Parse any t.me/s/<channel> page into structured posts (channel-agnostic)."""
+    posts: list[dict] = []
+    for block in MESSAGE_SPLIT.split(page_html):
+        if "data-post=" not in block:
+            continue
+        post_match = POST_ID.search(block)
+        if not post_match:
+            continue
+        post_ref = post_match.group(1)
+        channel, _, message_id = post_ref.rpartition("/")
+
+        reactions = parse_reactions(block)
+        text_block = REACTIONS_BLOCK.sub("", block)
+
+        text_match = TEXT_DIV.search(text_block)
+        text = strip_tags(text_match.group(1)) if text_match else ""
+
+        date_match = DATE.search(text_block)
+        views_match = VIEWS.search(text_block)
+        author_match = AUTHOR.search(text_block)
+
+        photos = dedupe(style_urls(PHOTO_TAG.findall(text_block)))
+        video_thumbs = dedupe(style_urls(VIDEO_THUMB_TAG.findall(text_block)))
+        stickers = dedupe(url for url in style_urls(STICKER_TAG.findall(text_block))
+                          if not EMOJI_ASSET.match(url))
+        videos = dedupe([normalize_url(v) for v in VIDEO_SRC.findall(text_block)])
+        documents = [d.strip() for d in DOC_TITLE.findall(text_block)]
+        link_preview_images = [
+            normalize_url(u)
+            for tag in LINK_PREVIEW_TAG.findall(text_block)
+            for u in IMG_SRC.findall(tag)
+            if not EMOJI_ASSET.match(normalize_url(u))
+        ]
+
+        media = sorted(name for name, marker in MEDIA_MARKERS.items() if marker in text_block)
+
+        posts.append({
+            "platform": "telegram",
+            "channel": channel,
+            "message_id": int(message_id) if message_id.isdigit() else message_id,
+            "permalink": f"https://t.me/{post_ref}",
+            "published_at": date_match.group(1) if date_match else None,
+            "author": strip_tags(author_match.group(1)) if author_match else None,
+            "text": text,
+            "views_text": views_match.group(1) if views_match else None,
+            "reactions": reactions,
+            "media": media,
+            "photos": photos,
+            "video_src": videos,
+            "video_thumbs": dedupe(video_thumbs + [u for u in link_preview_images if u not in video_thumbs]),
+            "stickers": stickers,
+            "document_titles": documents,
+            "capture_method": "telegram_public_preview",
+        })
+    return posts
+
+def walk_channel(channel: str, pages: int, before: int | None,
+                 timeout: int = 25, delay: float = 0.8) -> list[dict]:
+    """Walk backwards through a channel's public preview, newest first."""
+    channel = channel.lstrip("@").strip("/")
+    for prefix in ("https://t.me/s/", "http://t.me/s/", "t.me/s/"):
+        if channel.startswith(prefix):
+            channel = channel[len(prefix):]
+
+    collected: list[dict] = []
+    seen: set = set()
+    cursor = before
+
+    for page_index in range(pages):
+        url = f"https://t.me/s/{channel}"
+        if cursor is not None:
+            url += f"?before={cursor}"
+        page_html = fetch(url, timeout=timeout)
+
+        if "tgme_widget_message" not in page_html and "tgme_channel_info" not in page_html:
+            if page_index == 0:
+                raise PreviewError(
+                    f"no public preview content for '{channel}'. "
+                    "It may be private, renamed, or hidden from t.me/s.")
+            break
+
+        posts = parse_posts(page_html)
+        if not posts:
+            break
+
+        new_posts = [p for p in posts if (p["channel"], p["message_id"]) not in seen]
+        for post in new_posts:
+            seen.add((post["channel"], post["message_id"]))
+        collected.extend(new_posts)
+
+        numeric = [p["message_id"] for p in posts if isinstance(p["message_id"], int)]
+        if not numeric:
+            break
+        lowest = min(numeric)
+        if cursor is not None and lowest >= cursor:
+            break
+        cursor = lowest
+        if page_index < pages - 1:
+            time.sleep(delay)
+
+    collected.sort(key=lambda p: (p["message_id"] if isinstance(p["message_id"], int) else 0),
+                   reverse=True)
+    return collected
+
+# --------------------------------------------------------------------------
+# Images
+# --------------------------------------------------------------------------
+
+def download_images(posts: list[dict], channel: str, media_root: Path,
+                    per_post: int = 2, total_cap: int = 200, timeout: int = 25,
+                    delay: float = 0.3) -> tuple[int, int, int]:
+    """Download photo images for the given posts. Returns (files, bytes, skipped)."""
+    files = total_bytes = skipped = 0
+    for post in posts:
+        if files >= total_cap:
+            break
+        urls = post.get("photos", [])[:per_post]
+        if not urls:
+            post["local_images"] = []
+            continue
+
+        target_dir = media_root / channel / str(post["message_id"])
+        target_dir.mkdir(parents=True, exist_ok=True)
+        local: list[str] = []
+
+        for index, url in enumerate(urls, 1):
+            if files >= total_cap:
+                break
+            existing = sorted(target_dir.glob(f"{index:02d}.*"))
+            if existing and existing[0].stat().st_size > 0:
+                local.append(str(existing[0]))
+                files += 1
+                total_bytes += existing[0].stat().st_size
+                skipped += 1
+                continue
+            try:
+                payload, content_type = fetch_bytes(url, timeout)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ! image failed {post['message_id']}#{index}: {exc}", file=sys.stderr)
+                continue
+            suffix = (CONTENT_TYPE_EXT.get(content_type)
+                      or Path(urllib.parse.urlparse(url).path).suffix or ".jpg")
+            path = target_dir / f"{index:02d}{suffix}"
+            path.write_bytes(payload)
+            local.append(str(path))
+            files += 1
+            total_bytes += len(payload)
+            time.sleep(delay)
+
+        post["local_images"] = local
+    return files, total_bytes, skipped
+
+# --------------------------------------------------------------------------
+# Collector entry point
+# --------------------------------------------------------------------------
+
+def resolve_day(day: str, reference=None) -> str | None:
+    """'today' | 'yesterday' | 'auto' | 'YYYY-MM-DD' -> YYYY-MM-DD (CST)."""
+    from datetime import datetime, timedelta
+    reference = reference or datetime.now(CST)
+    if day in ("today", "auto"):
+        return None if day == "auto" else reference.date().isoformat()
+    if day == "yesterday":
+        return (reference.date() - timedelta(days=1)).isoformat()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day or ""):
+        return day
+    return None
+
+def collect(limit: int = 400, day: str = "auto", pages: int = 4,
+            channels: list[str] | None = None, **_):
+    channels = channels or CHANNELS
+    target = resolve_day(day)
+    auto = target is None
+    collected: list[dict] = []
+
+    for channel in channels:
+        channel_items: list[dict] = []
+        try:
+            channel_items = walk_channel(channel, pages, None)
+        except PreviewError as exc:
+            print(f"  ! telegram {channel} failed: {exc}", file=sys.stderr)
+            continue
+
+        day_counts: dict[str, int] = {}
+        for post in channel_items:
+            dt = base.to_cst(post.get("published_at"))
+            if dt:
+                day_counts[dt.date().isoformat()] = day_counts.get(dt.date().isoformat(), 0) + 1
+        channel_day = target if target else (max(day_counts) if day_counts else None)
+
+        for post in channel_items:
+            dt = base.to_cst(post.get("published_at"))
+            if not dt or not channel_day or dt.date().isoformat() != channel_day:
+                continue
+            text = post.get("text") or ""
+            collected.append(base.item(
+                SOURCE, f"Telegram · @{channel}",
+                (text.splitlines() or [""])[0][:120] or f"#{post['message_id']}",
+                post.get("permalink") or f"https://t.me/{channel}/{post['message_id']}",
+                kind="message", published_at=dt.isoformat(), date_source="post",
+                summary=text,
+                extra={
+                    "collector": "public_preview",
+                    "channel": channel,
+                    "message_id": post.get("message_id"),
+                    "views": post.get("views_text"),
+                    "media": post.get("media") or [],
+                    "photos": post.get("photos") or [],
+                    "reactions": post.get("reactions") or [],
+                    "text": text,
+                    "day": channel_day,
+                },
+            ))
+
+    collected.sort(key=lambda x: str(x.get("published_at") or ""), reverse=True)
+    if auto and collected:
+        print(f"  telegram: auto-selected day {collected[0]['extra'].get('day')}", file=sys.stderr)
+    return collected[:limit]
+
+def download_for_items(items: list[dict], media_root: Path, per_post: int = 2,
+                       cap: int = 200) -> int:
+    """Download images for already-collected items, grouped by channel."""
+    by_channel: dict[str, list[dict]] = {}
+    for entry in items:
+        by_channel.setdefault(entry["extra"]["channel"], []).append(entry)
+
+    total = 0
+    for channel, group in by_channel.items():
+        if total >= cap:
+            break
+        shim = [{"message_id": e["extra"].get("message_id"), "photos": e["extra"].get("photos") or []}
+                for e in group]
+        try:
+            files, _bytes, _skipped = download_images(
+                shim, channel, media_root, per_post, cap - total)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! image download failed for {channel}: {exc}", file=sys.stderr)
+            continue
+        total += files
+        for entry, shim_entry in zip(group, shim):
+            entry["extra"]["local_images"] = shim_entry.get("local_images") or []
+    return total

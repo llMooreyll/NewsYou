@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """Generate demo stage-2 decision files from the current collection.
 
-These are hand-written, not model output. They exist so the repository ships a
-working example of both decision formats, and so `site/digest.html` shows what
-stage 2 produces without anyone needing to call a model first.
+These are hand-written heuristics, not model output. They exist so the
+repository ships a working example of both decision formats, and so the digest
+shows what stage 2 produces without anyone needing to call a model first.
+
+The selection is **derived from the data**, not from hardcoded keywords: a
+hardcoded list silently degrades to "0 highlights" the moment the day's messages
+change. Merges come from cross-channel keyword overlap, highlights from a simple
+interest score, and themes from the clusters those produce.
 
 Real usage replaces these with actual model output.
 
-    python tools/demo_decisions.py
+    python tools/demo_decisions.py --collected data/collected --ai data/ai
 """
 from __future__ import annotations
 
+import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -21,128 +28,183 @@ import ai_stage  # noqa: E402
 COLLECTED = Path("data/collected")
 AIDIR = Path("data/ai")
 
+MODEL_NOTE = "demo-decisions (heuristic example, not model output)"
 
-def find(items: dict[str, dict], needle: str, channel: str | None = None) -> str | None:
-    for key, entry in items.items():
-        if needle in entry["title"] and (channel is None or (entry.get("extra") or {}).get("channel") == channel):
-            return key
-    return None
+# Words that carry no topic signal in these feeds.
+STOPWORDS = {
+    "公司", "表示", "宣布", "发布", "消息", "报道", "记者", "今天", "昨日", "今日",
+    "月", "日", "年", "中国", "美国", "来源", "根据", "以及", "并且", "但是", "因为",
+    "我们", "他们", "这个", "那个", "一个", "可以", "已经", "目前", "进行", "相关",
+    "the", "and", "for", "with", "that", "this", "from", "have", "will", "are",
+}
 
+def keywords(text: str) -> set[str]:
+    """Cheap topic-keyword extraction: CJK runs of >=2 and ASCII words of >=4."""
+    text = text or ""
+    latin = {w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9\-]{3,}", text)}
+    cjk_runs = re.findall(r"[\u4e00-\u9fff]{2,}", text)
+    cjk: set[str] = set()
+    for run in cjk_runs:
+        if run not in STOPWORDS:
+            cjk.add(run)
+        # also add 2-3 char shingles so "电动汽车" and "汽车贸易" can overlap
+        for size in (2, 3):
+            for i in range(len(run) - size + 1):
+                gram = run[i:i + size]
+                if gram not in STOPWORDS:
+                    cjk.add(gram)
+    return {w for w in (latin | cjk) if w not in STOPWORDS}
+
+def overlap(a: set[str], b: set[str]) -> set[str]:
+    return a & b
+
+def build_merges(entries: list[dict], id_of) -> list[dict]:
+    """Merge messages from different channels that share a clear topic."""
+    kws = {id_of(e): keywords(e.get("extra", {}).get("text") or e.get("title", "")) for e in entries}
+    used: set[str] = set()
+    actions: list[dict] = []
+
+    candidates: list[tuple[int, str, str, set[str]]] = []
+    for i, a in enumerate(entries):
+        for b in entries[i + 1:]:
+            if a["extra"].get("channel") == b["extra"].get("channel"):
+                continue
+            shared = overlap(kws[id_of(a)], kws[id_of(b)])
+            if len(shared) >= 4:
+                candidates.append((len(shared), id_of(a), id_of(b), shared))
+
+    candidates.sort(key=lambda x: -x[0])
+    for score, primary, secondary, shared in candidates:
+        if primary in used or secondary in used:
+            continue
+        used.update({primary, secondary})
+        pe = next(e for e in entries if id_of(e) == primary)
+        se = next(e for e in entries if id_of(e) == secondary)
+        pt = (pe["extra"].get("text") or "").strip()
+        st = (se["extra"].get("text") or "").strip()
+        # the longer message usually carries more detail; keep it as primary
+        if len(st) > len(pt):
+            primary, secondary, pe, se, pt, st = secondary, primary, se, pe, st, pt
+        actions.append({
+            "op": "merge", "primary_id": primary, "merge_ids": [secondary],
+            "title": (pt.splitlines() or [pe["title"]])[0][:90],
+            "summary": re.sub(r"\s+", " ", pt)[:400],
+            "topics": ["other"], "confidence": "medium",
+        })
+        if len(actions) >= 3:
+            break
+    return actions
+
+def build_highlights(entries: list[dict], id_of, merges: list[dict]) -> list[dict]:
+    """Rank messages by a simple interest score, capped per channel."""
+    merged_ids = {a["primary_id"] for a in merges} | {m for a in merges for m in a["merge_ids"]}
+    pool = [e for e in entries if id_of(e) not in merged_ids]
+
+    scored = []
+    for entry in pool:
+        text = entry["extra"].get("text") or ""
+        score = min(len(text), 600) / 10.0
+        if entry["extra"].get("views"):
+            try:
+                score += min(int(str(entry["extra"]["views"]).replace(",", "")), 20000) / 400.0
+            except ValueError:
+                pass
+        if entry["extra"].get("photos"):
+            score += 2
+        scored.append((score, entry))
+    scored.sort(key=lambda x: -x[0])
+
+    per_channel: dict[str, int] = {}
+    picked = []
+    for score, entry in scored:
+        channel = entry["extra"].get("channel") or "?"
+        if per_channel.get(channel, 0) >= 2:
+            continue
+        per_channel[channel] = per_channel.get(channel, 0) + 1
+        picked.append((score, entry))
+        if len(picked) >= 6:
+            break
+
+    highlights = []
+    for rank, (score, entry) in enumerate(picked, 1):
+        text = re.sub(r"\s+", " ", entry["extra"].get("text") or "").strip()
+        highlights.append({
+            "item_ids": [id_of(entry)],
+            "rank": rank,
+            "title": (text.splitlines() or [entry["title"]])[0][:80],
+            "summary": text[:220],
+            "topics": ["other"],
+            "importance": max(40, min(95, int(score) + 45)),
+            "why": f"单源，热度与篇幅综合排序（{len(text)} 字）",
+        })
+    return highlights
+
+def build_themes(highlights: list[dict], merges: list[dict]) -> list[dict]:
+    """Cluster highlights by shared keywords into a couple of named themes."""
+    if len(highlights) < 2:
+        return []
+    themes = []
+    if merges:
+        themes.append({
+            "name": "跨频道重复报道",
+            "summary": f"{len(merges)} 组消息由不同频道重复报道，已合并并保留原文。",
+            "item_ids": [m for a in merges for m in ([a["primary_id"]] + a["merge_ids"])],
+        })
+    if len(highlights) >= 3:
+        themes.append({
+            "name": "当日主要议题",
+            "summary": "按篇幅与热度排序，覆盖科技、产业与政策等方向。",
+            "item_ids": [h["item_ids"][0] for h in highlights[:3]],
+        })
+    return themes
 
 def main() -> int:
-    path = COLLECTED / "telegram.json"
+    parser = argparse.ArgumentParser(description="Generate demo stage-2 decision files.")
+    parser.add_argument("--collected", type=Path, default=COLLECTED)
+    parser.add_argument("--ai", type=Path, default=AIDIR)
+    args = parser.parse_args()
+    collected, aidir = args.collected, args.ai
+
+    path = collected / "telegram.json"
     if not path.exists():
         print(f"{path} not found; run tools/collect.py first", file=sys.stderr)
         return 1
 
-    items = {ai_stage.item_id(e): e for e in json.loads(path.read_text(encoding="utf-8"))["items"]}
-    day = json.loads((COLLECTED / "index.json").read_text(encoding="utf-8")).get("day", "")
+    entries = json.loads(path.read_text(encoding="utf-8"))["items"]
+    index = json.loads((collected / "index.json").read_text(encoding="utf-8"))
+    day = index.get("day", "")
+    engine = index.get("engine", "legacy")
 
-    oneplus_m = find(items, "一加 16", "MaiTungNews")
-    oneplus_g = find(items, "一加 16", "GodlyNews1")
-    kuke_g = find(items, "库克", "GodlyNews1")
-    kuke_x = find(items, "库克", "xhqcankao")
-    trump_t = find(items, "柴油", "tnews365")
-    trump_d = find(items, "柴油", "DNSPODT")
+    def id_of(entry: dict) -> str:
+        return ai_stage.item_id(entry)
 
-    actions = []
-    if oneplus_m and oneplus_g:
-        actions.append({
-            "op": "merge", "primary_id": oneplus_m, "merge_ids": [oneplus_g],
-            "title": "一加 16 正式发布：第六代骁龙 8 超级至尊版，185Hz 高刷，5999 元起",
-            "summary": "一加 16 于 10 月 13 日 10:00 正式开售，首销期至 11 月 13 日。搭载第六代骁龙 8 超级至尊版芯片，"
-                       "全球首发 185Hz 极速高刷，并配备全自研「电竞三芯」。定价 5999 元起，国补后 5199 元起；"
-                       "四个版本分别为 12+256GB 5999 元、12+512GB 6799 元、16+512GB 7499 元、16+1TB 8499 元，"
-                       "首销价与区域补贴价另有下调。",
-            "topics": ["technology"], "confidence": "high",
-        })
-    if kuke_g and kuke_x:
-        actions.append({
-            "op": "drop", "id": kuke_x, "canonical_id": kuke_g,
-            "reason": "同一新华社通稿，措辞与段落完全一致，无独有信息",
-        })
-    if trump_t and trump_d:
-        actions.append({
-            "op": "merge", "primary_id": trump_t, "merge_ids": [trump_d],
-            "title": "特朗普宣称俄乌达成「能源停火」，乌克兰与欧洲盟友均未确认",
-            "summary": "特朗普表示俄乌已同意立即实施能源停火，并称全球柴油价格上涨主要由俄乌战争引起、而非伊朗；"
-                       "他还建议乌克兰更换领导人。乌克兰方面称尚未收到停火确认，强调任何降级须双向对等，"
-                       "泽连斯基提出若俄方实现 60 天全面停火则愿组织选举。英德法等欧洲盟友重申支持乌克兰并将继续加大施压。"
-                       "停火说法公布后，哈尔科夫一座供暖和发电厂仍遭俄军袭击。",
-            "topics": ["policy", "society"], "confidence": "medium",
-        })
+    merges = build_merges(entries, id_of)
+    highlights = build_highlights(entries, id_of, merges)
+    themes = build_themes(highlights, merges)
 
-    AIDIR.mkdir(parents=True, exist_ok=True)
-    (AIDIR / "telegram_decisions.json").write_text(json.dumps({
+    aidir.mkdir(parents=True, exist_ok=True)
+    (aidir / "telegram_decisions.json").write_text(json.dumps({
         "schema": ai_stage.TELEGRAM_SCHEMA,
         "day": day,
-        "model": "demo-decisions (hand-written example, not model output)",
-        "actions": actions,
+        "model": MODEL_NOTE,
+        "actions": merges,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    def ids(*keys):
-        return [k for k in keys if k]
-
-    highlights = [
-        {"item_ids": ids(find(items, "诺贝尔经济学奖"), find(items, "诺贝尔和平奖")),
-         "rank": 1, "title": "2026 年诺贝尔经济学奖与和平奖揭晓",
-         "summary": "瑞典皇家科学院将经济学奖授予罗伯特·霍尔与迈克尔·伍德福德，表彰其奠定宏观经济稳定政策的微观经济学基础；"
-                    "和平奖授予纳瓦内特姆·皮莱，表彰其为促进和平与国际法所作的努力。",
-         "topics": ["society", "policy"], "importance": 90,
-         "why": "两家独立频道分别报道，同日两大奖项"},
-        {"item_ids": ids(find(items, "中欧")), "rank": 2,
-         "title": "中欧就混动与电动汽车贸易达成谅解",
-         "summary": "双方就混动汽车与电动汽车贸易形成多项共识，涉及配额安排与市场准入，是中欧经贸关系的重要节点。",
-         "topics": ["business", "policy"], "importance": 82, "why": "政策级事件，涉及产业与贸易"},
-        {"item_ids": ids(find(items, "Maia 300")), "rank": 3,
-         "title": "微软发布第三代自研 AI 芯片 Maia 300",
-         "summary": "微软推出第三代自研 AI 芯片 Maia 300，继续推进自研算力路线。",
-         "topics": ["ai", "technology"], "importance": 78, "why": "单源但行业影响重大"},
-        {"item_ids": ids(find(items, "一加 16", "MaiTungNews"), find(items, "一加 16", "GodlyNews1")),
-         "rank": 4, "title": "一加 16 正式发布，5999 元起",
-         "summary": "搭载第六代骁龙 8 超级至尊版芯片，全球首发 185Hz 极速高刷，配备全自研「电竞三芯」，"
-                    "10 月 13 日开售，国补后 5199 元起。",
-         "topics": ["technology"], "importance": 74, "why": "多源报道，定价与开售时间明确"},
-        {"item_ids": ids(find(items, "库克", "GodlyNews1")), "rank": 5,
-         "title": "何立峰会见苹果执行董事长蒂姆·库克",
-         "summary": "何立峰在人民大会堂会见库克，表示欢迎包括苹果在内的各国科技企业深化对华合作；"
-                    "库克称对在华长期发展充满信心。",
-         "topics": ["business", "policy"], "importance": 70, "why": "多源报道，中美经贸信号"},
-        {"item_ids": ids(find(items, "Linux内核")), "rank": 6,
-         "title": "Linux 创始人用 AI 完成重大内核改进",
-         "summary": "Linux 创始人借助 AI 工具完成了一项重大的 Linux 内核改进。",
-         "topics": ["technology", "ai"], "importance": 62, "why": "单源，但具标志性意义"},
-        {"item_ids": ids(find(items, "Arena发布")), "rank": 7,
-         "title": "Arena 第 41 周大模型榜单：the model 5.5 Max 登顶智能体榜",
-         "summary": "Arena 发布第 41 周大模型榜单，the model 5.5 Max 首次进入智能体榜并登顶。",
-         "topics": ["ai"], "importance": 58, "why": "单源，行业基准参考"},
-    ]
-    highlights = [h for h in highlights if h["item_ids"]]
-
-    themes = [
-        {"name": "AI 算力与模型竞赛",
-         "summary": "芯片、榜单、模型能力三条线同日推进，厂商竞争集中在算力与智能体能力上。",
-         "item_ids": ids(find(items, "Maia 300"), find(items, "Arena发布"))},
-        {"name": "中欧经贸与跨国企业",
-         "summary": "电动汽车贸易谅解与苹果高管访华同日出现，指向经贸关系的同步调整。",
-         "item_ids": ids(find(items, "中欧"), find(items, "库克", "GodlyNews1"))},
-    ]
-    themes = [t for t in themes if t["item_ids"]]
-
-    (AIDIR / "digest_decisions.json").write_text(json.dumps({
+    channels = sorted({e["extra"].get("channel") for e in entries if e["extra"].get("channel")})
+    (aidir / "digest_decisions.json").write_text(json.dumps({
         "schema": ai_stage.DIGEST_SCHEMA,
         "day": day,
-        "model": "demo-decisions (hand-written example, not model output)",
-        "headline": "诺贝尔奖集中揭晓，一加 16 与微软 Maia 300 同日登场，中欧就电动汽车贸易达成谅解。",
+        "model": MODEL_NOTE,
+        "headline": (highlights[0]["title"][:60] + "…") if highlights else "当日无显著要闻。",
         "highlights": highlights,
         "themes": themes,
-        "stats_note": f"当日 7 个频道共 {len(items)} 条消息，其中 3 组为跨频道重复，已合并；科技与政策类占多数。",
+        "stats_note": (f"{len(channels)} 个频道当日共 {len(entries)} 条消息，"
+                       f"其中 {len(merges)} 组为跨频道重复并已合并。引擎：{engine}。"),
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    print(f"wrote {AIDIR}/telegram_decisions.json ({len(actions)} actions)")
-    print(f"wrote {AIDIR}/digest_decisions.json ({len(highlights)} highlights, {len(themes)} themes)")
+    print(f"wrote {aidir}/telegram_decisions.json ({len(merges)} actions)")
+    print(f"wrote {aidir}/digest_decisions.json ({len(highlights)} highlights, {len(themes)} themes)")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

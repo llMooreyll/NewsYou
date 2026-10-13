@@ -27,21 +27,9 @@ from pathlib import Path
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
-ORDER = ["sspai", "telegram", "linuxdo", "latepost", "geekpark", "ruanyifeng",
-         "anywayfm", "hackernews", "weibo", "zhihu"]
-
-SOURCE_LABELS = {
-    "sspai": "少数派",
-    "telegram": "Telegram",
-    "linuxdo": "linux.do 晚报",
-    "latepost": "晚点 LatePost",
-    "geekpark": "极客公园",
-    "ruanyifeng": "阮一峰的网络日志",
-    "anywayfm": "Anyway.Now 安妮薇看看",
-    "hackernews": "Hacker News",
-    "weibo": "微博热搜",
-    "zhihu": "知乎热榜",
-}
+# Source order and labels have one source of truth: tools/collectors/registry.py.
+# Re-exported here so the AI layer and the collector can never drift apart.
+from collectors.registry import ORDER, SOURCE_LABELS  # noqa: E402,F401
 
 TOPICS = ["technology", "ai", "business", "policy", "society", "security",
           "internet", "other"]

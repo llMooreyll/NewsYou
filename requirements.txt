@@ -1,0 +1,14 @@
+# Optional "modern" extraction engine (tools/extract.py, engine=modern).
+#
+# The collector defaults to the standard-library "legacy" engine, which needs
+# nothing installed. These packages are only imported when you select the
+# modern engine, so a legacy-only checkout still runs on a bare Python.
+#
+#   python3 -m venv .venv
+#   ./.venv/bin/pip install -r requirements.txt
+#   ./.venv/bin/python tools/collect.py --all --engine modern
+#
+# trafilatura  general article/body extraction (own rules + readability + jusText fallbacks)
+# feedparser   RSS/Atom feed parsing (replaces the hand-rolled CDATA regexes)
+trafilatura==2.3.1
+feedparser==6.0.14

@@ -120,6 +120,96 @@ def paragraphs(text: str) -> str:
             out.append(f"<p>{esc(chunk)}</p>")
     return "".join(out)
 
+# --------------------------------------------------------------------------
+# Rich bodies: keep inline links
+#
+# The modern engine returns cleaned HTML, so anchor text like 「来源」 can stay
+# clickable. The legacy engine returns plain text only, so it keeps rendering
+# through paragraphs(). Gating on the engine keeps the legacy digest byte-for-byte
+# what it was, and makes the A/B show the difference instead of hiding it.
+# --------------------------------------------------------------------------
+
+_ALLOWED_TAGS = {"p", "br", "h2", "h3", "h4", "strong", "b", "em", "i",
+                 "code", "pre", "blockquote", "ul", "ol", "li", "a"}
+_DROP_CONTENT_TAGS = {"script", "style", "iframe", "noscript", "svg", "form",
+                     "button", "input", "select", "textarea", "img", "figure", "video"}
+_TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9]*)([^>]*?)(/?)\s*>")
+_HREF_RE = re.compile(r"href\s*=\s*(\"([^\"]*)\"|'([^']*)')", re.I)
+
+def _safe_href(attrs: str) -> str | None:
+    match = _HREF_RE.search(attrs or "")
+    if not match:
+        return None
+    url = html.unescape(match.group(2) if match.group(2) is not None else match.group(3) or "").strip()
+    return url if url.startswith(("http://", "https://")) else None
+
+def sanitize_html(fragment: str) -> str:
+    """Keep a small allowlist of tags and only http(s) hrefs.
+
+    Input comes from the extractor, but this is the last line of defence: the
+    output is embedded in a shared single-file page, so scripts, event handlers
+    and javascript: URLs must not survive.
+    """
+    if not fragment:
+        return ""
+    out: list[str] = []
+    pos = 0
+    skip_until: str | None = None
+    a_stack: list[bool] = []
+
+    for match in _TAG_RE.finditer(fragment):
+        text = fragment[pos:match.start()]
+        if skip_until is None and text:
+            out.append(esc(text))
+        pos = match.end()
+
+        closing, name, attrs, selfclose = (match.group(1), match.group(2).lower(),
+                                           match.group(3), match.group(4))
+        if skip_until is not None:
+            if closing and name == skip_until:
+                skip_until = None
+            continue
+        if name in _DROP_CONTENT_TAGS:
+            if not closing and not selfclose:
+                skip_until = name
+            continue
+        if name not in _ALLOWED_TAGS:
+            continue
+        if name == "a":
+            if closing:
+                if a_stack and a_stack.pop():
+                    out.append("</a>")
+            else:
+                href = _safe_href(attrs)
+                if href:
+                    a_stack.append(True)
+                    out.append(f'<a class="lnk" href="{esc(href)}" target="_blank" '
+                               f'rel="noopener noreferrer">')
+                else:
+                    a_stack.append(False)
+            continue
+        if name == "br":
+            out.append("<br>")
+        elif closing:
+            out.append(f"</{name}>")
+        else:
+            out.append(f"<{name}>")
+
+    tail = fragment[pos:]
+    if skip_until is None and tail:
+        out.append(esc(tail))
+    return "".join(out)
+
+def _use_rich(entry: dict) -> bool:
+    """Rich (link-preserving) rendering is enabled for modern bodies only."""
+    return (entry.get("extra") or {}).get("extract_engine") == "modern"
+
+def body_fragment(block: dict, rich: bool) -> str:
+    """Render one body block, preserving links when the engine provided HTML."""
+    if rich and block.get("html"):
+        return sanitize_html(block["html"])
+    return paragraphs(block.get("text") or "")
+
 
 def data_uri(path: Path) -> str:
     raw = path.read_bytes()
@@ -401,14 +491,16 @@ def render_sspai_panel(items: list[dict]) -> str:
     out = []
 
     for entry in morning:
+        rich = _use_rich(entry)
         sections = entry.get("sections") or []
         if sections:
             blocks = "".join(
-                f'<section class="blk"><h4>{esc(s.get("title") or "")}</h4>{paragraphs(s.get("text") or "")}</section>'
+                f'<section class="blk"><h4>{esc(s.get("title") or "")}</h4>'
+                f'{body_fragment(s, rich)}</section>'
                 for s in sections
             )
         else:
-            blocks = paragraphs(entry.get("body_text") or "")
+            blocks = body_fragment(entry, rich)
         out.append(f'''<article class="feature">
   <header class="feature-head">
     <span class="kicker">派早报</span>
@@ -431,7 +523,8 @@ def article_row(entry: dict) -> str:
         extra = entry.get("extra") or {}
         scope = {"today": "今日更新", "latest": "最新一期", "requested": "按需抓取"}.get(extra.get("body_scope"), "")
         label = f'全文{(" · " + scope) if scope else ""}'
-        detail = expander(label, f'<div class="article">{paragraphs(body)}</div>', f"{len(body)} 字")
+        inner = body_fragment(entry, _use_rich(entry))
+        detail = expander(label, f'<div class="article">{inner}</div>', f"{len(body)} 字")
     elif entry.get("summary"):
         detail = f'<p class="row-sum">{esc(entry["summary"][:280])}</p>'
     else:
