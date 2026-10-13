@@ -33,7 +33,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ai_model  # noqa: E402
 import ai_stage  # noqa: E402
 import config  # noqa: E402
-from ai_stage import ORDER  # noqa: E402
 
 SKIP_FILES = {"index.json", "telegram_duplicate_groups.json"}
 
@@ -259,12 +258,10 @@ def main() -> int:
     # ---------------- write processed sources ----------------
     written: set[str] = set()
     if not args.dry_run:
-        for name in ORDER:
-            if name not in processed:
-                continue
+        for name in ai_stage.source_order(processed):
             write_json(args.out / f"{name}.json", {
                 "source": name,
-                "source_name": ai_stage.SOURCE_LABELS.get(name, name),
+                "source_name": ai_stage.source_label(name, processed[name]),
                 "day": day,
                 "generated_at": report["generated_at"],
                 "count": len(processed[name]),

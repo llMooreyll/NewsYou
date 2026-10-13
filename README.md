@@ -49,7 +49,7 @@ make all AI=none
 |---|---|
 | `make setup` | 建 `.venv` 并安装 `requirements.txt` |
 | `make check` | 验证依赖与两个引擎是否可用 |
-| `make test` | 跑离线回归测试（37 项，不联网） |
+| `make test` | 跑离线回归测试（53 项，不联网） |
 | `make config` | 打印**生效配置**，并标注每个值来自哪一层 |
 | `make collect` | 只抓取 → `data/collected/` |
 | `make ai` | 只做 AI 两阶段 → `data/processed/` |
@@ -596,7 +596,7 @@ url = "https://example.com/feed.xml"
 ## 8. 测试与验证
 
 ```bash
-make test      # 37 项离线测试，不联网、不调模型
+make test      # 53 项离线测试，不联网、不调模型
 ```
 
 覆盖：采集解析（Telegram 引用块、图片路径、日期选择）、TLS 校验未被削弱、归档原子替换与版本命名、**跨天决策复用校验**、AI 决策校验、渲染器报告、配置优先级与校验、后端命令形状、模型溯源覆盖。

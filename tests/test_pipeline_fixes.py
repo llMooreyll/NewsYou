@@ -332,6 +332,17 @@ class StageTwoRun(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.out.glob("*.json")),
                          ["hackernews.json", "index.json", "notes.json"])
 
+    def test_a_configured_feed_reaches_the_processed_data(self):
+        post = base.item("my-blog", "示例博客", "A post", "https://blog.example/1")
+        self.collect("my-blog", [post])
+        self.run_stage()
+        written = json.loads((self.out / "my-blog.json").read_text(encoding="utf-8"))
+        self.assertEqual(written["source_name"], "示例博客")
+        self.assertEqual(len(written["items"]), 1)
+        sent = json.loads((self.ai / "digest_input.json").read_text(encoding="utf-8"))
+        self.assertEqual(list(sent["sources"]), ["hackernews", "my-blog"])
+        self.assertEqual(sent["sources"]["my-blog"]["source_name"], "示例博客")
+
 
 class RendererReport(unittest.TestCase):
     def test_failed_and_empty_channels_show_in_the_rail(self):

@@ -53,6 +53,26 @@ def load_prompt(name: str) -> str:
     return ""
 
 
+def source_order(names) -> list[str]:
+    """Built-in sources in panel order, then every other one as given.
+
+    ORDER names the ten built-in sources only. A `[[feeds]]` entry in
+    config.toml is a source it has never heard of, so walking ORDER alone
+    dropped configured feeds at this stage: collected, then never written to
+    data/processed/ and never shown.
+    """
+    names = list(names)
+    return [n for n in ORDER if n in names] + [n for n in names if n not in ORDER]
+
+
+def source_label(name: str, items: list[dict]) -> str:
+    """Display name: the built-in label, else the name the collector stamped on
+    the items (a configured feed's `name`), else the id itself."""
+    if name in SOURCE_LABELS:
+        return SOURCE_LABELS[name]
+    return next((e["source_name"] for e in items if e.get("source_name")), name)
+
+
 # --------------------------------------------------------------------------
 # Identity
 # --------------------------------------------------------------------------
@@ -145,15 +165,13 @@ def build_telegram_input(items: list[dict], day: str) -> dict:
 def build_digest_input(results: dict[str, list[dict]], statuses: dict[str, dict], day: str) -> dict:
     sources: dict[str, dict] = {}
     total = 0
-    for name in ORDER:
-        if name not in results:
-            continue
+    for name in source_order(results):
         items = results[name]
         status = statuses.get(name) or {}
         payload = [slim_item(e) for e in items]
         total += len(payload)
         sources[name] = {
-            "source_name": SOURCE_LABELS.get(name, name),
+            "source_name": source_label(name, items),
             "updated_today": status.get("updated_today"),
             "staleness_days": status.get("staleness_days"),
             "latest_published_at": status.get("latest_published_at"),
