@@ -3,24 +3,24 @@
 
     python tools/render_digest.py --indir data/processed --output site/digest.html
 
-Design
-------
 One file, zero external requests: CSS, JS and images are inlined, so the output
-can be shared as a single attachment.
+can be shared as a single attachment. The stylesheet and script live in
+tools/digest_assets/ so they can be edited as real CSS/JS; they are read and
+inlined at render time.
 
-Layout rules that come from actual usability problems:
-
-- Tabs wrap instead of scrolling, so no source is ever clipped.
-- Telegram cards use CSS Grid, not multi-column. Expanding content inside a
-  multi-column layout reflows the whole column, which makes cards jump; a grid
-  keeps every card in place.
-- The original messages behind an AI merge open in an overlay, not inline, so
-  nothing on the page moves at all.
-- Full-text disclosure animates with grid-template-rows 0fr -> 1fr, which is a
-  real height transition rather than a display flip.
-
-Theme: light and dark, following the system preference, with a manual toggle
-persisted in localStorage.
+Layout per source type
+----------------------
+- tabs        one scrollable row; edge fades and arrow buttons appear only on
+              the side that hides tabs.
+- boards      Hacker News, 微博, 知乎: fixed 36px rows, rank / title / bar /
+              numbers in aligned columns, so the whole list fits one screen.
+- telegram    masonry dealt in reading order to the shortest column (JS), with
+              image sizes written at build time so nothing reflows. A side rail
+              filters by channel.
+- sectioned   linux.do, 少数派 and the digest get a sticky side rail with
+              scroll-spy; on narrow screens it becomes a second scroll strip.
+- articles    date column + title + two-line summary, full text in an
+              animated expander.
 """
 from __future__ import annotations
 
@@ -29,112 +29,176 @@ import base64
 import html
 import json
 import mimetypes
+import os
 import re
+import struct
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import urlparse, quote
 
 CST = timezone(timedelta(hours=8))
+ROOT = Path(__file__).resolve().parent.parent
+ASSETS = Path(__file__).resolve().parent / "digest_assets"
 
+# name -> (tab label, subtitle)
 SOURCE_META = {
-    "sspai": ("少数派", "派早报全文 · 其余标题"),
-    "telegram": ("Telegram", "当日全部消息"),
-    "linuxdo": ("linux.do 晚报", "六个板块"),
-    "latepost": ("晚点 LatePost", "深度报道"),
+    "sspai": ("少数派", "派早报全文 · 近期文章"),
+    "telegram": ("Telegram", "订阅频道当日消息"),
+    "linuxdo": ("linux.do", "社区晚报"),
+    "latepost": ("晚点", "LatePost 深度报道"),
     "geekpark": ("极客公园", "科技资讯"),
-    "ruanyifeng": ("阮一峰", "科技周刊"),
-    "anywayfm": ("Anyway.Now", "设计链接集"),
-    "hackernews": ("Hacker News", "top stories"),
+    "ruanyifeng": ("阮一峰", "科技爱好者周刊"),
+    "anywayfm": ("Anyway.Now", "设计与工具链接"),
+    "hackernews": ("Hacker News", "Top stories"),
     "weibo": ("微博热搜", "实时榜"),
     "zhihu": ("知乎热榜", "全站榜"),
 }
 ORDER = list(SOURCE_META)
 
-KIND_LABEL = {
-    "newsletter": "周刊", "article": "文章", "link": "链接",
-    "topic": "帖子", "hotsearch": "热搜", "message": "消息",
-}
-
-DATE_SOURCE_LABEL = {
-    "collection_time": "抓取时间", "relative_balloon": "页面相对时间",
-    "archive_month": "归档月份", "api_relative": "接口相对时间",
-    "issue_date": "出刊日", "atom": "RSS", "rss": "RSS", "api": "接口",
-    "page": "页面", "post": "帖文", "article_page": "文章页",
-}
+# Panel headings where the full name does not fit a tab.
+PANEL_TITLE = {"linuxdo": "linux.do 晚报", "latepost": "晚点 LatePost", "ruanyifeng": "阮一峰的网络日志"}
 
 TOPIC_LABEL = {
     "technology": "科技", "ai": "AI", "business": "商业", "policy": "政策",
     "society": "社会", "security": "安全", "internet": "互联网", "other": "其他",
 }
 
+# Dates from these sources carry no real time of day; show the date only.
+DATE_ONLY_SOURCES = {"api_relative", "relative_balloon", "issue_date", "archive_month"}
+
+WEEKDAYS = "一二三四五六日"
+
+# Small inline icons (stroke = currentColor).
+ICON = {
+    "l": '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7.5 2.5 4 6l3.5 3.5"/></svg>',
+    "r": '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4.5 2.5 8 6 4.5 9.5"/></svg>',
+    "x": '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg>',
+    "out": '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 1.5h5.5V7M8.5 1.5 1.5 8.5"/></svg>',
+    "eye": '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2"/></svg>',
+    "play": '<svg viewBox="0 0 10 10" fill="currentColor"><path d="M2.5 1.5v7l6-3.5z"/></svg>',
+}
+
+# Render context: the day being rendered, so "today" is the data's day and not
+# the wall clock when the file is opened.
+_CTX = {"day": None}
+
 
 # --------------------------------------------------------------------------
-# helpers
+# small helpers
 # --------------------------------------------------------------------------
 
 def esc(value) -> str:
     return html.escape(str(value if value is not None else ""), quote=True)
 
 
+def parse_iso(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=CST)
+    return dt.astimezone(CST)
+
+
 def fmt_time(value) -> str:
-    if not value:
-        return ""
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return str(value)[:16]
-    return dt.astimezone(CST).strftime("%H:%M")
+    dt = parse_iso(value)
+    return dt.strftime("%H:%M") if dt else ""
 
 
-def fmt_date(value) -> str:
-    if not value:
-        return ""
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return str(value)[:10]
-    return dt.astimezone(CST).strftime("%m-%d")
+def fmt_md(value) -> str:
+    dt = parse_iso(value)
+    return dt.strftime("%m-%d") if dt else ""
 
 
 def fmt_day(value) -> str:
+    dt = parse_iso(value) if value and "T" in str(value) else None
+    if dt is None:
+        try:
+            dt = datetime.strptime(str(value)[:10], "%Y-%m-%d")
+        except (ValueError, TypeError):
+            return str(value or "")
+    return f"{dt.year}.{dt.month:02d}.{dt.day:02d} 周{WEEKDAYS[dt.weekday()]}"
+
+
+def is_today(value) -> bool:
+    dt = parse_iso(value)
+    return bool(dt and _CTX["day"] and dt.date().isoformat() == _CTX["day"])
+
+
+def stamp(entry: dict) -> tuple[str, str]:
+    """(date label, time label) honest about how precise the source is."""
+    dt = parse_iso(entry.get("published_at"))
+    if not dt:
+        return "", ""
+    src = entry.get("date_source") or ""
+    if src == "archive_month":
+        return dt.strftime("%Y-%m"), ""
+    date = "今天" if is_today(entry.get("published_at")) else dt.strftime("%m-%d")
+    if src in DATE_ONLY_SOURCES or src == "collection_time":
+        return date, ""
+    return date, dt.strftime("%H:%M")
+
+
+def domain(url: str) -> str:
+    host = (urlparse(url or "").netloc or "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def fmt_heat(value) -> str:
     try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(CST)
-        return f"{dt.year} 年 {dt.month} 月 {dt.day} 日"
-    except (ValueError, TypeError):
+        n = float(value)
+    except (TypeError, ValueError):
         return str(value or "")
+    if n >= 1e8:
+        return f"{n / 1e8:.1f}亿"
+    if n >= 1e4:
+        return f"{n / 1e4:.1f}万" if n < 1e6 else f"{n / 1e4:.0f}万"
+    return f"{n:.0f}"
+
+
+def heat_number(value) -> float:
+    """'585 万热度' -> 5850000.0; plain numbers pass through."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.search(r"([\d.]+)\s*(亿|万)?", str(value or ""))
+    if not match:
+        return 0.0
+    n = float(match.group(1))
+    return n * {"亿": 1e8, "万": 1e4}.get(match.group(2) or "", 1)
 
 
 def linkify(text: str) -> str:
     out = esc(text)
-    out = re.sub(r"(https?://[^\s<]+)", r'<a class="lnk" href="\1" rel="noopener noreferrer">\1</a>', out)
+    out = re.sub(r"(https?://[^\s<]+)",
+                 r'<a class="lnk" href="\1" target="_blank" rel="noopener noreferrer">\1</a>', out)
     return out.replace("\n", "<br>")
 
 
-def paragraphs(text: str) -> str:
-    if not text:
-        return ""
-    out = []
-    for chunk in [c.strip() for c in re.split(r"\n{2,}", text) if c.strip()]:
-        if re.match(r"^#{1,4}\s", chunk):
-            out.append(f'<h4 class="h">{esc(chunk.lstrip("# ").strip())}</h4>')
-        else:
-            out.append(f"<p>{esc(chunk)}</p>")
-    return "".join(out)
+def ext(url: str, label: str, cls: str = "") -> str:
+    c = f' class="{cls}"' if cls else ""
+    return f'<a{c} href="{esc(url)}" target="_blank" rel="noopener noreferrer">{label}</a>'
+
 
 # --------------------------------------------------------------------------
-# Rich bodies: keep inline links
+# HTML sanitising
 #
-# The modern engine returns cleaned HTML, so anchor text like 「来源」 can stay
-# clickable. The legacy engine returns plain text only, so it keeps rendering
-# through paragraphs(). Gating on the engine keeps the legacy digest byte-for-byte
-# what it was, and makes the A/B show the difference instead of hiding it.
+# Bodies come from extractors and from Telegram's own markup. The output is a
+# shared file, so this is the last line of defence: allowlisted tags only, no
+# attributes except http(s) hrefs, and tags are balanced on the way out so a
+# fragment cut mid-element cannot leak formatting into the rest of the page.
 # --------------------------------------------------------------------------
 
 _ALLOWED_TAGS = {"p", "br", "h2", "h3", "h4", "strong", "b", "em", "i",
                  "code", "pre", "blockquote", "ul", "ol", "li", "a"}
 _DROP_CONTENT_TAGS = {"script", "style", "iframe", "noscript", "svg", "form",
-                     "button", "input", "select", "textarea", "img", "figure", "video"}
-_TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9]*)([^>]*?)(/?)\s*>")
+                      "button", "input", "select", "textarea", "img", "figure", "video"}
+_VOID_TAGS = {"img", "input", "br", "hr", "source", "wbr"}
+_TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9-]*)([^>]*?)(/?)\s*>")
 _HREF_RE = re.compile(r"href\s*=\s*(\"([^\"]*)\"|'([^']*)')", re.I)
+
 
 def _safe_href(attrs: str) -> str | None:
     match = _HREF_RE.search(attrs or "")
@@ -143,17 +207,8 @@ def _safe_href(attrs: str) -> str | None:
     url = html.unescape(match.group(2) if match.group(2) is not None else match.group(3) or "").strip()
     return url if url.startswith(("http://", "https://")) else None
 
+
 def sanitize_html(fragment: str) -> str:
-    """Keep a small allowlist of tags and only http(s) hrefs.
-
-    Input comes from the extractor, but this is the last line of defence: the
-    output is embedded in a shared single-file page, so scripts, event handlers
-    and javascript: URLs must not survive.
-
-    Tags are balanced on the way out, so a fragment cut mid-element (Telegram
-    messages are frequently split right after an opening <b>) cannot leak an
-    unclosed tag into the rest of the page.
-    """
     if not fragment:
         return ""
     out: list[str] = []
@@ -165,7 +220,7 @@ def sanitize_html(fragment: str) -> str:
     for match in _TAG_RE.finditer(fragment):
         text = fragment[pos:match.start()]
         if skip_until is None and text:
-            out.append(esc(text))
+            out.append(esc(html.unescape(text)))
         pos = match.end()
 
         closing, name, attrs, selfclose = (match.group(1), match.group(2).lower(),
@@ -175,7 +230,9 @@ def sanitize_html(fragment: str) -> str:
                 skip_until = None
             continue
         if name in _DROP_CONTENT_TAGS:
-            if not closing and not selfclose:
+            # void elements (<img>, <input>) have no content to skip; waiting
+            # for their closing tag would swallow the rest of the fragment
+            if not closing and not selfclose and name not in _VOID_TAGS:
                 skip_until = name
             continue
         if name not in _ALLOWED_TAGS:
@@ -191,8 +248,7 @@ def sanitize_html(fragment: str) -> str:
                 if href:
                     a_kept.append(True)
                     open_stack.append("a")
-                    out.append(f'<a class="lnk" href="{esc(href)}" target="_blank" '
-                               f'rel="noopener noreferrer">')
+                    out.append(f'<a href="{esc(href)}" target="_blank" rel="noopener noreferrer">')
                 else:
                     a_kept.append(False)
             continue
@@ -200,30 +256,86 @@ def sanitize_html(fragment: str) -> str:
             out.append("<br>")
         elif closing:
             if name in open_stack:
-                open_stack.remove(name)
-                out.append(f"</{name}>")
+                # close anything opened after it so nesting stays valid
+                while open_stack:
+                    top = open_stack.pop()
+                    out.append(f"</{top}>")
+                    if top == name:
+                        break
         else:
             open_stack.append(name)
             out.append(f"<{name}>")
 
     tail = fragment[pos:]
     if skip_until is None and tail:
-        out.append(esc(tail))
+        out.append(esc(html.unescape(tail)))
     for name in reversed(open_stack):
         out.append(f"</{name}>")
     return "".join(out)
 
+
+_EMPTY_EL = re.compile(r"<(p|strong|b|em|i|h[234]|li|blockquote)>(?:\s|&nbsp;|<br>|\u200b)*</\1>")
+
+
+def tidy(fragment: str) -> str:
+    """Remove the empty <p><strong><br></strong></p> scaffolding CMSs leave."""
+    out = fragment.replace("\u200b", "").replace("\ufeff", "")
+    for _ in range(4):
+        new = _EMPTY_EL.sub("", out)
+        if new == out:
+            break
+        out = new
+    out = re.sub(r"<p>\s*(?:<br>\s*)+", "<p>", out)
+    out = re.sub(r"(?:<br>\s*)+</p>", "</p>", out)
+    # a <br> next to a block element is an empty line, not spacing
+    blocks = r"(?:p|blockquote|ul|ol|li|h[234]|pre)"
+    out = re.sub(rf"(</{blocks}>)\s*(?:<br>\s*)+", r"\1", out)
+    out = re.sub(rf"(?:<br>\s*)+(<{blocks}>)", r"\1", out)
+    out = re.sub(r"(?:<br>\s*){3,}", "<br><br>", out)
+    out = re.sub(r"^(?:\s*<br>)+|(?:<br>\s*)+$", "", out.strip())
+    return out.strip()
+
+
+_MD_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
+_MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _inline_md(text: str) -> str:
+    out = esc(text)
+    out = _MD_LINK.sub(lambda m: f'<a href="{m.group(2)}" target="_blank" rel="noopener noreferrer">{m.group(1)}</a>', out)
+    out = _MD_BOLD.sub(r"<strong>\1</strong>", out)
+    return out.replace("****", "")
+
+
+def paragraphs(text: str) -> str:
+    """Plain/markdown-ish text -> paragraphs, headings and lists."""
+    if not text:
+        return ""
+    out = []
+    for chunk in [c.strip() for c in re.split(r"\n{2,}", text) if c.strip()]:
+        heading = re.match(r"^(#{1,4})\s+(.*)", chunk)
+        if heading:
+            level = min(4, max(2, len(heading.group(1)) + 1))
+            out.append(f"<h{level}>{_inline_md(heading.group(2).strip())}</h{level}>")
+            continue
+        lines = chunk.splitlines()
+        if all(re.match(r"^\s*[-*•]\s+", l) for l in lines):
+            items = "".join(f"<li>{_inline_md(re.sub(r'^\s*[-*•]\s+', '', l))}</li>" for l in lines)
+            out.append(f"<ul>{items}</ul>")
+            continue
+        body = "<br>".join(_inline_md(l) for l in lines)
+        if re.sub(r"<[^>]+>|\s", "", body):
+            out.append(f"<p>{body}</p>")
+    return "".join(out)
+
+
 def _use_rich(entry: dict) -> bool:
-    """Rich (link-preserving) rendering is enabled for modern bodies only."""
+    """Link-preserving HTML bodies exist for the modern engine only."""
     return (entry.get("extra") or {}).get("extract_engine") == "modern"
 
-def body_fragment(block: dict, rich: bool) -> str:
-    """Render one body block, preserving links when the engine provided HTML.
 
-    Accepts either a section ({"text", "html"}) or a whole item
-    ({"body_text", "body_html"}). Those two shapes are different on purpose:
-    sections describe part of an article, items describe the article itself.
-    """
+def body_fragment(block: dict, rich: bool) -> str:
+    """Render a section ({text, html}) or a whole item ({body_text, body_html})."""
     text = block.get("text")
     if text is None:
         text = block.get("body_text")
@@ -231,871 +343,718 @@ def body_fragment(block: dict, rich: bool) -> str:
     if html_body is None:
         html_body = block.get("body_html")
     if rich and html_body:
-        return sanitize_html(html_body)
+        cleaned = tidy(sanitize_html(html_body))
+        if cleaned:
+            return cleaned
     return paragraphs(text or "")
 
 
-def data_uri(path: Path) -> str:
+# --------------------------------------------------------------------------
+# images
+# --------------------------------------------------------------------------
+
+def image_size(raw: bytes) -> tuple[int, int] | None:
+    """Width/height from the header bytes of JPEG, PNG, GIF or WebP."""
+    try:
+        if raw[:8] == b"\x89PNG\r\n\x1a\n":
+            return struct.unpack(">II", raw[16:24])
+        if raw[:6] in (b"GIF87a", b"GIF89a"):
+            return struct.unpack("<HH", raw[6:10])
+        if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+            kind = raw[12:16]
+            if kind == b"VP8 ":
+                w, h = struct.unpack("<HH", raw[26:30])
+                return w & 0x3FFF, h & 0x3FFF
+            if kind == b"VP8L":
+                b = raw[21:25]
+                w = 1 + (((b[1] & 0x3F) << 8) | b[0])
+                h = 1 + (((b[3] & 0x0F) << 10) | (b[2] << 2) | ((b[1] & 0xC0) >> 6))
+                return w, h
+            if kind == b"VP8X":
+                w = 1 + int.from_bytes(raw[24:27], "little")
+                h = 1 + int.from_bytes(raw[27:30], "little")
+                return w, h
+        if raw[:2] == b"\xff\xd8":
+            i = 2
+            while i < len(raw) - 9:
+                if raw[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = raw[i + 1]
+                if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                    i += 2
+                    continue
+                length = struct.unpack(">H", raw[i + 2:i + 4])[0]
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    h, w = struct.unpack(">HH", raw[i + 5:i + 9])
+                    return w, h
+                i += 2 + length
+    except (struct.error, IndexError):
+        return None
+    return None
+
+
+def resolve_local(value: str) -> Path | None:
+    for candidate in (Path(value), ROOT / value):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def image_tag(path: Path, embed: bool, out_dir: Path) -> str:
     raw = path.read_bytes()
-    mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
-    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+    size = image_size(raw)
+    if embed:
+        mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+        src = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+    else:
+        try:
+            src = Path(os.path.relpath(path.resolve(), out_dir.resolve())).as_posix()
+        except ValueError:          # different drive on Windows
+            src = path.resolve().as_uri()
+    dims = f' width="{size[0]}" height="{size[1]}"' if size else ""
+    return f'<img src="{esc(src)}"{dims} alt="" loading="lazy" decoding="async">'
 
 
-def chips(entry: dict) -> str:
-    extra = entry.get("extra") or {}
-    out = []
-    if extra.get("section_name"):
-        out.append(f'<span class="chip accent">{esc(extra["section_name"])}</span>')
-    if extra.get("rank"):
-        out.append(f'<span class="chip accent">#{esc(extra["rank"])}</span>')
-    if extra.get("heat"):
-        out.append(f'<span class="chip">{esc(str(extra["heat"])[:14])}</span>')
-    if extra.get("score"):
-        out.append(f'<span class="chip">{esc(extra["score"])} 分</span>')
-    if extra.get("comments"):
-        out.append(f'<span class="chip">{esc(extra["comments"])} 评论</span>')
-    if entry.get("author"):
-        out.append(f'<span class="chip">{esc(entry["author"])}</span>')
-    return "".join(out)
+# --------------------------------------------------------------------------
+# shared fragments
+# --------------------------------------------------------------------------
+
+def panel_head(title: str, sub: str, status: dict | None, extra_meta: str = "") -> str:
+    meta = [extra_meta] if extra_meta else []
+    if status:
+        if status.get("updated_today"):
+            meta.append('<span class="fresh-tag ok">今日更新</span>')
+        elif status.get("staleness_days") is not None:
+            meta.append(f'<span class="fresh-tag">{esc(status["staleness_days"])} 天未更新</span>')
+        latest = status.get("latest_published_at")
+        if latest:
+            meta.append(f'<span><span class="k">最新 </span><span class="v">{esc(fmt_md(latest))} {esc(fmt_time(latest))}</span></span>')
+    return (f'<header class="ph"><div class="ph-t"><h1>{esc(title)}</h1>'
+            + (f'<p class="ph-sub">{esc(sub)}</p>' if sub else "")
+            + f'</div><div class="ph-meta">{"".join(meta)}</div></header>')
 
 
-def meta_row(entry: dict, *, with_date: bool = False) -> str:
-    when = fmt_time(entry.get("published_at"))
-    if with_date and entry.get("published_at"):
-        when = f'{fmt_date(entry["published_at"])} {when}'
-    src = DATE_SOURCE_LABEL.get(entry.get("date_source", ""), "")
-    parts = []
-    if when:
-        parts.append(f"<time>{esc(when)}</time>")
-    if src:
-        parts.append(f'<span class="src">{esc(src)}</span>')
-    parts.append(chips(entry))
-    return f'<div class="meta">{"".join(parts)}</div>'
+def scroller(inner: str, cls: str = "", label: str = "") -> str:
+    aria = f' aria-label="{esc(label)}"' if label else ""
+    return (f'<div class="scroller {cls}">'
+            f'<button class="sc-btn l" type="button" tabindex="-1" aria-hidden="true">{ICON["l"]}</button>'
+            f'<div class="scroller-track"{aria}>{inner}</div>'
+            f'<button class="sc-btn r" type="button" tabindex="-1" aria-hidden="true">{ICON["r"]}</button>'
+            "</div>")
 
 
-def freshness(status: dict) -> str:
-    if not status:
-        return ""
-    if status.get("updated_today"):
-        return '<span class="badge ok">今日已更新</span>'
-    days = status.get("staleness_days")
-    if days is None:
-        return '<span class="badge">无时间信息</span>'
-    return f'<span class="badge">{days} 天未更新</span>'
-
-
-def expander(label: str, inner: str, count: str = "") -> str:
-    """Smooth height disclosure driven by grid-template-rows."""
-    return (
-        f'<div class="exp">'
-        f'<button class="exp-btn" type="button" aria-expanded="false">'
-        f'<span class="exp-icon"></span>{esc(label)}'
-        + (f'<span class="exp-count">{esc(count)}</span>' if count else "")
+def rail(links: list[tuple[str, str, int | None]], mode: str, heading: str) -> str:
+    """links: (target-or-filter key, label, count)."""
+    attr = "data-target" if mode == "spy" else "data-filter"
+    items = "".join(
+        f'<button class="rail-a{" on" if i == 0 else ""}" type="button" {attr}="{esc(key)}" title="{esc(label)}">'
+        f'<span class="lbl">{esc(label)}</span>'
+        + (f'<span class="n">{count}</span>' if count is not None else "")
         + "</button>"
-        f'<div class="exp-body"><div class="exp-inner">{inner}</div></div>'
-        "</div>"
+        for i, (key, label, count) in enumerate(links)
     )
+    inner = f'<nav class="rail-list" aria-label="{esc(heading)}">{items}<span class="rail-ink"></span></nav>'
+    return (f'<aside class="rail" data-mode="{mode}"><div class="rail-h">{esc(heading)}</div>'
+            f'{scroller(inner)}</aside>')
+
+
+def with_rail(rail_html: str, content: str) -> str:
+    return f'<div class="lay">{rail_html}<div class="content">{content}</div></div>'
+
+
+def expander(label: str, count: str, inner: str) -> str:
+    chev = '<svg class="chev" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3.5 2 6.5 5l-3 3"/></svg>'
+    return (f'<div class="exp"><button class="exp-btn" type="button" aria-expanded="false">{chev}'
+            f'{esc(label)}' + (f'<span class="c">{esc(count)}</span>' if count else "") + "</button>"
+            f'<div class="exp-body"><div class="exp-inner"><div class="exp-pad">'
+            f'<div class="prose">{inner}</div>'
+            f'<button class="exp-close" type="button">收起 ↑</button>'
+            "</div></div></div></div>")
 
 
 # --------------------------------------------------------------------------
-# digest panel — the editorial briefing
+# digest panel
 # --------------------------------------------------------------------------
+
+def _ref_name(ref: dict) -> str:
+    if ref.get("channel"):
+        return "@" + ref["channel"]
+    return ref.get("source_name") or SOURCE_META.get(ref.get("source") or "", (ref.get("source") or "",))[0]
+
 
 def render_digest_panel(digest: dict) -> str:
     cards = digest.get("cards") or []
     if not cards:
         return '<p class="empty">今日无汇总条目</p>'
 
-    lead = cards[0]
-    rest = cards[1:]
+    def topics(items) -> str:
+        return "".join(f'<span class="tp-c">{esc(TOPIC_LABEL.get(t, t))}</span>' for t in items or [])
 
-    def sources_line(refs) -> str:
+    def refs(items) -> str:
         seen, out = set(), []
-        for ref in refs:
-            name = ref.get("channel") and f'@{ref["channel"]}' or (ref.get("source_name") or "")
+        for ref in items or []:
+            name = _ref_name(ref)
             if not name or name in seen:
                 continue
             seen.add(name)
-            out.append(f'<a href="{esc(ref.get("url"))}" rel="noopener noreferrer">{esc(name)}</a>')
-        return " · ".join(out)
+            out.append(ext(ref.get("url"), esc(name) + " ↗"))
+        return "".join(out)
 
-    def topics(items) -> str:
-        return "".join(
-            f'<span class="topic">{esc(TOPIC_LABEL.get(t, t))}</span>' for t in items or []
+    lead, rest = cards[0], cards[1:]
+    secs = []
+    lead_html = (f'<article class="dg-lead rv" style="--i:1"><div class="no">01 · 头条</div>'
+                 f'<h2>{esc(lead.get("title"))}</h2>'
+                 + (f'<p>{esc(lead.get("summary"))}</p>' if lead.get("summary") and lead.get("summary") != lead.get("title") else "")
+                 + f'<div class="dg-m">{topics(lead.get("topics"))}'
+                 + (f'<span>{esc(lead.get("why"))}</span>' if lead.get("why") else "")
+                 + f'<span>重要度 {esc(lead.get("importance"))}</span>{refs(lead.get("refs"))}</div></article>')
+    head = f'<p class="dg-hl rv">{esc(digest.get("headline"))}</p>' if digest.get("headline") else ""
+    secs.append(f'<section class="sec" id="dg-lead">{head}{lead_html}</section>')
+
+    if rest:
+        rows = "".join(
+            f'<article class="dg-it rv" style="--i:{i + 2}"><div class="no">{int(c.get("rank") or i + 2):02d}</div>'
+            f'<div><h3>{esc(c.get("title"))}</h3>'
+            + (f'<p>{esc(c.get("summary"))}</p>' if c.get("summary") and c.get("summary") != c.get("title") else "")
+            + f'<div class="dg-m">{topics(c.get("topics"))}'
+            + (f'<span>{esc(c.get("why"))}</span>' if c.get("why") else "")
+            + f'{refs(c.get("refs"))}</div></div>'
+            f'<div class="sc">{esc(c.get("importance"))}</div></article>'
+            for i, c in enumerate(rest)
         )
+        secs.append(f'<section class="sec" id="dg-items"><h2 class="sec-h">要点<span class="n">{len(rest)}</span></h2>{rows}</section>')
 
-    lead_refs = "".join(
-        f'''<a class="lead-src" href="{esc(r.get("url"))}" rel="noopener noreferrer">
-      <span class="lead-src-name">{esc(r.get("channel") and "@" + r["channel"] or r.get("source_name") or "")}</span>
-      <span class="lead-src-title">{esc((r.get("title") or "")[:70])}</span>
-    </a>''' for r in lead.get("refs") or []
-    )
-
-    lead_html = f'''<article class="lead">
-  <div class="lead-flag"><span class="lead-rank">01</span><span class="lead-bar"></span></div>
-  <h2 class="lead-title">{esc(lead.get("title"))}</h2>
-  <p class="lead-summary">{esc(lead.get("summary"))}</p>
-  <div class="lead-meta">
-    {topics(lead.get("topics"))}
-    {f'<span class="why">{esc(lead.get("why"))}</span>' if lead.get("why") else ""}
-    <span class="score" title="重要度">{esc(lead.get("importance"))}</span>
-  </div>
-  <div class="lead-refs">{lead_refs}</div>
-</article>'''
-
-    rows = []
-    for card in rest:
-        rows.append(f'''<li class="item">
-  <div class="item-rank">{card.get("rank"):02d}</div>
-  <div class="item-main">
-    <h3 class="item-title">{esc(card.get("title"))}</h3>
-    <p class="item-summary">{esc(card.get("summary"))}</p>
-    <div class="item-meta">
-      {topics(card.get("topics"))}
-      {f'<span class="why">{esc(card.get("why"))}</span>' if card.get("why") else ""}
-      <span class="item-score">{esc(card.get("importance"))}</span>
-      <span class="item-srcs">{sources_line(card.get("refs") or [])}</span>
-    </div>
-  </div>
-</li>''')
-
-    themes = ""
-    if digest.get("themes"):
-        cards_html = "".join(
-            f'''<div class="theme">
-  <div class="theme-name">{esc(t.get("name"))}</div>
-  <p class="theme-sum">{esc(t.get("summary"))}</p>
-  <div class="theme-refs">{"".join(f'<a href="{esc(r.get("url"))}" rel="noopener noreferrer">{esc(r.get("channel") and "@" + r["channel"] or r.get("source") or "")}</a>' for r in t.get("refs") or [])}</div>
-</div>''' for t in digest["themes"]
+    themes = digest.get("themes") or []
+    if themes:
+        cells = "".join(
+            f'<div class="th"><div class="th-n">{esc(t.get("name"))}</div>'
+            f'<p class="th-s">{esc(t.get("summary"))}</p>'
+            f'<div class="th-r">{refs(t.get("refs"))}</div></div>' for t in themes
         )
-        themes = f'<section class="themes"><h3 class="section-h">今日脉络</h3><div class="theme-grid">{cards_html}</div></section>'
+        secs.append(f'<section class="sec" id="dg-themes"><h2 class="sec-h">脉络<span class="n">{len(themes)}</span></h2>'
+                    f'<div class="dg-th">{cells}</div></section>')
 
-    foot = []
+    notes = []
     if digest.get("stats_note"):
-        foot.append(f'<p class="note">{esc(digest["stats_note"])}</p>')
+        notes.append(esc(digest["stats_note"]))
     if digest.get("model"):
-        foot.append(f'<p class="byline">AI 处理 · {esc(digest["model"])}</p>')
+        notes.append("AI · " + esc(digest["model"]))
+    if notes:
+        secs.append(f'<p class="dg-note">{"<br>".join(notes)}</p>')
 
-    return f'''<header class="digest-head">
-  <p class="headline">{esc(digest.get("headline"))}</p>
-</header>
-{lead_html}
-<ol class="items">{"".join(rows)}</ol>
-{themes}
-{"".join(foot)}'''
+    links = [("dg-lead", "头条", None)]
+    if rest:
+        links.append(("dg-items", "要点", len(rest)))
+    if themes:
+        links.append(("dg-themes", "脉络", len(themes)))
+    return with_rail(rail(links, "spy", "本页"), f'<div class="dg">{"".join(secs)}</div>')
 
 
 # --------------------------------------------------------------------------
-# telegram panel
+# telegram
 # --------------------------------------------------------------------------
 
-def _telegram_body(text: str, text_html: str) -> tuple[str, str]:
-    """Split a post into an optional lead line and the remaining body.
+_BR = re.compile(r"<br\s*/?>", re.I)
+_TAGS_ONLY = re.compile(r"^(?:\s*(?:🗒\s*)?(?:标签[:：])?\s*(?:#[^\s#]+\s*)+)$")
+_BOILER = re.compile(
+    r"^\s*(?:📢\s*)?(?:频道|投稿|订阅|关注|Channel|Subscribe)\s*[:：]|"
+    r"^\s*(?:🤖\s*)?投稿\s*[:：]|"
+    r"^\s*🌸?\s*科技圈\s*·|"
+    r"^\s*(?:📮|📬|👉)\s*(?:投稿|订阅|频道)"
+)
+_VIA = re.compile(r"^\s*(?:——|—|来源[:：]|via\s)", re.I)
 
-    Telegram's own markup is kept when present, so inline links (the 「路透社」
-    style source links) survive instead of being flattened to text. The lead is
-    taken from the plain text and removed from the markup so the headline is not
-    shown twice.
+
+def _plain(fragment: str) -> str:
+    text = re.sub(r"<[^>]+>", "", fragment)
+    return html.unescape(text).replace("\u200e", "").replace("\u200f", "").strip()
+
+
+def _tg_hashtags(text: str) -> list[str]:
+    return re.findall(r"#([^\s#]+)", text)
+
+
+def telegram_parts(entry: dict) -> dict:
+    """Split one post into title / body paragraphs / hashtags.
+
+    Channel signatures ("频道: @x", "投稿: @bot") and hashtag lines are not
+    content; they are lifted out so cards read as news, not as boilerplate.
     """
-    lines = [l for l in (text or "").splitlines() if l.strip()]
-    head = lines[0] if len(lines) > 1 and len(lines[0]) <= 64 else ""
-    rest_lines = lines[1:] if head else lines
+    extra = entry.get("extra") or {}
+    merged = bool(entry.get("ai_merged"))
+    src_html = "" if merged else (extra.get("text_html") or "")
+    plain = entry.get("summary") if merged else (extra.get("text") or entry.get("summary") or "")
 
-    if text_html:
-        src = text_html
-        if head:
-            parts = re.split(r"<br\s*/?>", src, maxsplit=1)
-            src = parts[1] if len(parts) > 1 else ""
-        src = re.sub(r"^(?:\s*<br\s*/?>)+\s*", "", src).strip()
-        if src:
-            return head, f'<div class="tg-text">{sanitize_html(src)}</div>'
-    if rest_lines:
-        return head, '<div class="tg-text">' + "<br>".join(linkify(l) for l in rest_lines) + "</div>"
-    return head, ""
+    if src_html:
+        # <tg-emoji>/<i class="emoji"> wrappers carry a <b> with the emoji;
+        # unwrap them so the emoji stays plain text and is not bolded.
+        src_html = re.sub(r'<i class="emoji"[^>]*><b>(.*?)</b></i>', r"\1", src_html, flags=re.S)
+        lines = _BR.split(src_html)
+    else:
+        lines = [esc(l) for l in (plain or "").split("\n")]
 
-def render_telegram_panel(items: list[dict], embed: bool, base_dir: Path) -> str:
-    cards = []
-    for index, entry in enumerate(items, 1):
-        extra = entry.get("extra") or {}
-        channel = extra.get("channel", "")
-        merged = bool(entry.get("ai_merged"))
-        text = entry.get("summary") if merged else (extra.get("text") or entry.get("summary") or "")
-
-        # first line is often the headline of the post
-        head, body_html = _telegram_body(text, "" if merged else (extra.get("text_html") or ""))
-
-        # images first, above the text
-        local = [p for p in (extra.get("local_images") or []) if Path(p).exists()]
-        remote = extra.get("photos") or []
-        shots = ""
-        if local or remote:
-            count = min(len(local or remote), 3)
-            cells = []
-            for i, value in enumerate((local or remote)[:count]):
-                if local and not embed:
-                    try:
-                        src = Path(value).relative_to(base_dir.parent).as_posix()
-                    except ValueError:
-                        src = Path(value).as_posix()
-                elif local:
-                    src = data_uri(Path(value))
-                else:
-                    src = value
-                cells.append(f'<img loading="lazy" decoding="async" src="{esc(src)}" alt="">')
-            shots = f'<div class="shots n{count}">{"".join(cells)}</div>'
-
-        head_html = f'<p class="tg-lead">{esc(head)}</p>' if head else ""
-
-        badges = []
-        if merged:
-            badges.append(f'<span class="badge accent">AI 合并 · {len(entry.get("merged_from") or [])} 条</span>')
-        if extra.get("views"):
-            badges.append(f'<span class="badge">{esc(extra["views"])}</span>')
-
-        reactions = ""
-        if extra.get("reactions"):
-            reactions = '<div class="rx">' + "".join(
-                f'<span>{esc(r.get("emoji"))}{esc(r.get("count")) if r.get("count") is not None else ""}</span>'
-                for r in extra["reactions"][:5]
-            ) + "</div>"
-
-        overlay_btn = ""
-        if merged and entry.get("originals"):
-            overlay_btn = (
-                f'<button class="ghost-btn" type="button" data-overlay="orig-{index}">'
-                f'查看原始消息 · {len(entry["originals"])}</button>'
-            )
-
-        cards.append(f'''<article class="tg" style="--i:{min(index, 18)}">
-  <div class="tg-head">
-    <a class="tg-ch" href="https://t.me/{esc(channel)}" rel="noopener noreferrer">@{esc(channel)}</a>
-    <time>{esc(fmt_time(entry.get("published_at")))}</time>
-    <a class="tg-id" href="{esc(entry.get("url"))}" rel="noopener noreferrer">#{esc(extra.get("message_id"))}</a>
-  </div>
-  {shots}
-  {head_html}
-  {body_html}
-  <div class="tg-foot">{"".join(badges)}{reactions}</div>
-  {overlay_btn}
-</article>''')
-
-    # overlay payloads
-    overlays = []
-    for index, entry in enumerate(items, 1):
-        if not (entry.get("ai_merged") and entry.get("originals")):
+    tags: list[str] = []
+    kept: list[str] = []
+    for line in lines:
+        text = _plain(line)
+        if text and _TAGS_ONLY.match(text):
+            tags += _tg_hashtags(text)
             continue
+        if text and _BOILER.search(text):
+            continue
+        kept.append(line)
+
+    # title: first non-empty line when it is short, or fully bold
+    title = ""
+    first = next((i for i, l in enumerate(kept) if _plain(l)), None)
+    if first is not None:
+        line = kept[first]
+        text = _plain(line)
+        bold = bool(re.fullmatch(r"\s*<b>.*</b>\s*", line, re.S))
+        more = any(_plain(l) for l in kept[first + 1:])
+        if more and (bold or len(text) <= 60):
+            title = text
+            kept = kept[first + 1:]
+
+    if merged:
+        title = entry.get("title") or title
+        body = (plain or "").strip()
+        if title and body.startswith(title.rstrip("…")):
+            body = body[len(title.rstrip("…")):].lstrip(" ，。,.:：\n")
+        kept = [esc(body)] if body else []
+
+    # group lines into paragraphs on blank lines
+    paras: list[list[str]] = [[]]
+    for line in kept:
+        if _plain(line):
+            paras[-1].append(line)
+        elif paras[-1]:
+            paras.append([])
+    out = []
+    for group in paras:
+        if not group:
+            continue
+        if src_html:
+            frag = tidy(sanitize_html("<br>".join(group)))
+        else:
+            frag = linkify("\n".join(html.unescape(l) for l in group))
+        if not frag:
+            continue
+        cls = ' class="via"' if _VIA.match(_plain(group[0])) and len(group) == 1 else ""
+        tag = "div" if re.search(r"<(?:blockquote|ul|ol|pre|h[234])>", frag) else "p"
+        out.append(f"<{tag}{cls}>{frag}</{tag}>")
+    body_html = "".join(out)
+    chars = sum(len(_plain(l)) for l in kept)
+    return {"title": title, "body": body_html, "tags": list(dict.fromkeys(tags)), "chars": chars}
+
+
+def _reply_quote(text: str) -> str:
+    text = (text or "").replace("\u200e", "").replace("\u200f", "").strip()
+    if not text:
+        return ""
+    parts = [p.strip() for p in text.split("\n") if p.strip()]
+    who, rest = (parts[0], " ".join(parts[1:])) if len(parts) > 1 else ("", parts[0])
+    return f'<div class="tg-q">{f"<b>{esc(who)}</b>" if who else ""}{esc(rest[:220])}</div>'
+
+
+def _tg_images(values: list[str], embed: bool, out_dir: Path) -> str:
+    paths = [p for p in (resolve_local(v) for v in values or []) if p][:2]
+    if not paths:
+        return ""
+    cells = "".join(image_tag(p, embed, out_dir) for p in paths)
+    return f'<div class="shots n{len(paths)}">{cells}</div>'
+
+
+def _tg_card(entry: dict, index: int, embed: bool, out_dir: Path) -> tuple[str, str]:
+    extra = entry.get("extra") or {}
+    channel = extra.get("channel") or ""
+    merged = bool(entry.get("ai_merged"))
+    parts = telegram_parts(entry)
+
+    shots = _tg_images(extra.get("local_images") or [], embed, out_dir)
+    media = set(extra.get("media") or [])
+    pill = ""
+    if not shots and (media & {"video", "video_message", "photo", "document", "audio", "voice", "poll"}):
+        kind = ("视频" if media & {"video", "video_message"} else "图片" if "photo" in media
+                else "文件" if "document" in media else "音频" if media & {"audio", "voice"} else "投票")
+        pill = ext(entry.get("url"), f'{ICON["play"]}{kind} · 在 Telegram 查看', "tg-media")
+
+    title = f'<h3 class="tg-t">{esc(parts["title"])}</h3>' if parts["title"] else ""
+    body = ""
+    if parts["body"]:
+        long = parts["chars"] > 260
+        body = f'<div class="tg-b{" clamp" if long else ""}">{parts["body"]}</div>'
+        if long:
+            body += '<button class="more" type="button" aria-expanded="false">展开全文</button>'
+
+    tags = ""
+    if parts["tags"]:
+        tags = '<div class="tg-tags">' + "".join(
+            ext(f"https://t.me/s/{quote(channel)}?q=%23{quote(t)}", "#" + esc(t)) for t in parts["tags"][:6]
+        ) + "</div>"
+
+    quote_html = "" if merged else _reply_quote(extra.get("reply_text") or "")
+
+    rx = ""
+    if extra.get("reactions"):
+        rx = '<span class="rx">' + "".join(
+            f'<span>{esc(r.get("emoji"))} {esc(r.get("count")) if r.get("count") is not None else ""}</span>'
+            for r in extra["reactions"][:3]
+        ) + "</span>"
+    views = f'<span class="vw">{ICON["eye"]}{esc(extra["views"])}</span>' if extra.get("views") else ""
+
+    cmp_btn, tpl = "", ""
+    if merged and entry.get("originals"):
+        n = len(entry["originals"])
+        cmp_btn = (f'<button class="cmp" type="button" data-ov="og-{index}" data-ov-title="原始消息 · {n} 条">'
+                   f'对照 {n} 条原始消息</button>')
         blocks = []
         for orig in entry["originals"]:
-            blocks.append(f'''<div class="orig">
-  <div class="orig-head">
-    <span class="orig-ch">@{esc(orig.get("channel") or orig.get("source_name") or "")}</span>
-    <time>{esc(fmt_time(orig.get("published_at")))}</time>
-    <a href="{esc(orig.get("url"))}" rel="noopener noreferrer">原文 ↗</a>
-  </div>
-  <div class="orig-text">{sanitize_html(orig.get("text_html")) if orig.get("text_html") else linkify(orig.get("text") or "")}</div>
-</div>''')
-        overlays.append(
-            f'<template id="orig-{index}"><h3 class="ov-title">原始消息 · {len(entry["originals"])} 条</h3>'
-            f'<p class="ov-note">{esc(entry.get("title"))}</p>{"".join(blocks)}</template>'
-        )
+            op = telegram_parts({"extra": {"text_html": orig.get("text_html") or "",
+                                           "text": orig.get("text") or ""}})
+            body_o = (f'<p><b>{esc(op["title"])}</b></p>' if op["title"] else "") + op["body"]
+            blocks.append(
+                f'<div class="og"><div class="og-h"><span class="ch">@{esc(orig.get("channel") or "")}</span>'
+                f'<time>{esc(fmt_time(orig.get("published_at")))}</time>'
+                f'{ext(orig.get("url"), "原文 ↗")}</div><div class="tg-b">{body_o}</div></div>')
+        tpl = (f'<template id="og-{index}"><p class="ov-note">{esc(entry.get("title"))}</p>'
+               f'{"".join(blocks)}</template>')
 
-    return f'<div class="tg-grid">{"".join(cards)}</div>{"".join(overlays)}'
+    ai = f'<span class="tg-ai">AI 合并 {len(entry.get("merged_from") or [])}</span>' if merged else ""
+    card = (f'<article class="tg" data-ch="{esc(channel)}">'
+            f'<div class="tg-h">{ext("https://t.me/" + channel, "@" + esc(channel), "tg-ch")}{ai}'
+            f'<time>{esc(fmt_time(entry.get("published_at")))}</time></div>'
+            f'{shots}{quote_html}{title}{body}{pill}{tags}{cmp_btn}'
+            f'<div class="tg-f">{views}{rx}{ext(entry.get("url"), "原帖" + ICON["out"], "go")}</div>'
+            "</article>")
+    return card, tpl
+
+
+def render_telegram_panel(items: list[dict], embed: bool, out_dir: Path) -> str:
+    cards, tpls = [], []
+    counts: dict[str, int] = {}
+    for index, entry in enumerate(items, 1):
+        card, tpl = _tg_card(entry, index, embed, out_dir)
+        cards.append(card)
+        tpls.append(tpl)
+        ch = (entry.get("extra") or {}).get("channel") or ""
+        counts[ch] = counts.get(ch, 0) + 1
+    links = [("*", "全部频道", len(items))] + [
+        (ch, "@" + ch, n) for ch, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+    ]
+    grid = f'<div class="mas">{"".join(cards)}</div>{"".join(tpls)}'
+    return with_rail(rail(links, "filter", "频道"), grid)
 
 
 # --------------------------------------------------------------------------
-# other panels
+# boards: Hacker News / 微博 / 知乎
 # --------------------------------------------------------------------------
 
-def render_linuxdo_panel(items: list[dict]) -> str:
-    order = ["今日要闻", "AI 前线", "开源开发", "福利羊毛", "社区闲话", "站外速览", "读者评论"]
-    groups: dict[str, list[dict]] = {}
-    for entry in items:
-        groups.setdefault((entry.get("extra") or {}).get("section_name") or "其他", []).append(entry)
-
-    issue = next(((e.get("extra") or {}).get("issue_title") for e in items
-                  if (e.get("extra") or {}).get("issue_title")), "")
-    out = [f'<p class="issue">{esc(issue)}</p>'] if issue else []
-    for name in [n for n in order if n in groups] + [n for n in groups if n not in order]:
-        rows = "".join(
-            f'''<li class="row">
-  <a class="row-title" href="{esc(e.get("url"))}" rel="noopener noreferrer">{esc(e.get("title"))}</a>
-  {f'<p class="row-sum">{esc((e.get("summary") or "")[:280])}</p>' if (e.get("summary") or "").strip() else ""}
-</li>''' for e in groups[name]
-        )
-        out.append(f'<section class="group"><h3 class="section-h">{esc(name)}<span class="count">{len(groups[name])}</span></h3>'
-                   f'<ol class="rows">{rows}</ol></section>')
-    return "".join(out)
+def _bar(value: float, top: float) -> str:
+    ratio = 0 if top <= 0 else max(0.02, min(1.0, value / top))
+    return f'<span class="br-bar"><i style="--w:{ratio:.3f}"></i></span>'
 
 
-def render_sspai_panel(items: list[dict]) -> str:
-    morning = [i for i in items if "派早报" in i["title"]]
-    others = [i for i in items if "派早报" not in i["title"]]
-    out = []
-
-    for entry in morning:
-        rich = _use_rich(entry)
-        sections = entry.get("sections") or []
-        if sections:
-            blocks = "".join(
-                f'<section class="blk"><h4>{esc(s.get("title") or "")}</h4>'
-                f'{body_fragment(s, rich)}</section>'
-                for s in sections
-            )
-        else:
-            blocks = body_fragment(entry, rich)
-        out.append(f'''<article class="feature">
-  <header class="feature-head">
-    <span class="kicker">派早报</span>
-    <h3><a href="{esc(entry.get("url"))}" rel="noopener noreferrer">{esc(entry.get("title"))}</a></h3>
-    {meta_row(entry)}
-  </header>
-  <div class="feature-body">{blocks or '<p class="empty">本期未抓取全文</p>'}</div>
-</article>''')
-
-    if others:
-        rows = "".join(article_row(e) for e in others)
-        out.append(f'<section class="group"><h3 class="section-h">其他文章<span class="count">{len(others)}</span></h3>'
-                   f'<ol class="rows">{rows}</ol></section>')
-    return "".join(out)
+def render_hn_board(items: list[dict]) -> str:
+    top = max([float((e.get("extra") or {}).get("score") or 0) for e in items] or [0])
+    rows = []
+    for i, e in enumerate(items, 1):
+        x = e.get("extra") or {}
+        score = float(x.get("score") or 0)
+        hn = x.get("hn_url") or e.get("url")
+        dom = domain(e.get("url"))
+        dom = "" if dom == "news.ycombinator.com" else dom
+        date, tm = stamp(e)
+        when = tm if date == "今天" else date
+        rows.append(
+            f'<li class="br rv{" top" if i <= 3 else ""}" style="--i:{i}">'
+            f'<span class="br-rk">{i}</span>'
+            f'<span class="br-t">{ext(e.get("url"), esc(e.get("title")))}'
+            + (f'<span class="br-dom">{esc(dom)}</span>' if dom else "")
+            + f'</span>{_bar(score, top)}'
+            f'<span class="br-v">{score:.0f}</span>'
+            f'<span class="br-v dim">{ext(hn, esc(x.get("comments") or 0))}</span>'
+            f'<span class="br-tm">{esc(when)}</span></li>')
+    legend = ('<div class="bd-legend"><span></span><span>标题</span><span class="h-bar"></span>'
+              '<span style="text-align:right">分</span><span style="text-align:right">评论</span>'
+              '<span class="h-tm" style="text-align:right">时间</span></div>')
+    return f'<div class="b-hn">{legend}<ol class="board">{"".join(rows)}</ol></div>'
 
 
-def article_row(entry: dict) -> str:
-    body = entry.get("body_text")
-    if body:
-        extra = entry.get("extra") or {}
-        scope = {"today": "今日更新", "latest": "最新一期", "requested": "按需抓取"}.get(extra.get("body_scope"), "")
-        label = f'全文{(" · " + scope) if scope else ""}'
-        inner = body_fragment(entry, _use_rich(entry))
-        detail = expander(label, f'<div class="article">{inner}</div>', f"{len(body)} 字")
-    elif entry.get("summary"):
-        detail = f'<p class="row-sum">{esc(entry["summary"][:280])}</p>'
-    else:
+def render_weibo_board(items: list[dict]) -> str:
+    vals = [heat_number((e.get("extra") or {}).get("heat")) for e in items]
+    top = max(vals or [0])
+    rows = []
+    for i, (e, v) in enumerate(zip(items, vals), 1):
+        x = e.get("extra") or {}
+        rank = x.get("rank") or i
+        label = (x.get("label") or "").strip()
+        cls = "hot" if label in ("沸", "爆") else "new" if label == "新" else ""
+        badge = f'<span class="lbl-t {cls}">{esc(label[:1])}</span>' if label else "<span></span>"
+        rows.append(
+            f'<li class="br rv{" top" if i <= 3 else ""}" style="--i:{i}">'
+            f'<span class="br-rk">{esc(rank)}</span>'
+            f'<span class="br-t">{ext(e.get("url"), esc(e.get("title")))}</span>'
+            f'{badge}{_bar(v, top)}<span class="br-v">{esc(fmt_heat(v))}</span></li>')
+    legend = ('<div class="bd-legend"><span></span><span>话题</span><span></span><span class="h-bar"></span>'
+              '<span style="text-align:right">热度</span></div>')
+    return f'<div class="b-wb">{legend}<ol class="board">{"".join(rows)}</ol></div>'
+
+
+def render_zhihu_board(items: list[dict]) -> str:
+    vals = [heat_number((e.get("extra") or {}).get("heat")) for e in items]
+    top = max(vals or [0])
+    rows = []
+    for i, (e, v) in enumerate(zip(items, vals), 1):
+        x = e.get("extra") or {}
+        excerpt = re.sub(r"\s+", " ", e.get("summary") or "").strip()
+        if re.fullmatch(r"https?://\S+", excerpt):
+            excerpt = ""
+        rows.append(
+            f'<li class="br rv{" top" if i <= 3 else ""}" style="--i:{i}">'
+            f'<span class="br-rk">{esc(x.get("rank") or i)}</span>'
+            f'<span class="br-t">{ext(e.get("url"), esc(e.get("title")))}'
+            + (f'<span class="br-x" title="{esc(excerpt[:400])}">{esc(excerpt[:160])}</span>' if len(excerpt) > 8 else "")
+            + f'</span>{_bar(v, top)}<span class="br-v">{esc(fmt_heat(v))}</span></li>')
+    legend = ('<div class="bd-legend"><span></span><span>问题</span><span class="h-bar"></span>'
+              '<span style="text-align:right">热度</span></div>')
+    return f'<div class="b-zh">{legend}<ol class="board">{"".join(rows)}</ol></div>'
+
+
+# --------------------------------------------------------------------------
+# article lists
+# --------------------------------------------------------------------------
+
+def article_rows(items: list[dict], *, start: int = 0) -> str:
+    rows, last = [], None
+    for k, e in enumerate(items):
+        x = e.get("extra") or {}
+        date, tm = stamp(e)
+        rep = " rep" if date and date == last else ""
+        last = date
+        today = " today" if date == "今天" else ""
+        dcol = (f'<span class="d{today}{rep}">{esc(date)}</span>' if date else "") + (f"<time>{esc(tm)}</time>" if tm else "")
+
+        summary = re.sub(r"\s+", " ", e.get("summary") or "").strip()
+        if summary.rstrip(".。… ") == (e.get("title") or "").strip():
+            summary = ""
+        meta = []
+        if e.get("author"):
+            meta.append(f'<span>{esc(e["author"])}</span>')
+        if x.get("is_exclusive"):
+            meta.append('<span class="x">独家</span>')
+        tags = []
+        for t in e.get("tags") or []:
+            tags += [s.strip() for s in str(t).split(",") if s.strip()]
+        meta += [f'<span class="tag">#{esc(t)}</span>' for t in tags[:4]]
+
         detail = ""
-    return f'''<li class="row">
-  <a class="row-title" href="{esc(entry.get("url"))}" rel="noopener noreferrer">{esc(entry.get("title"))}</a>
-  {meta_row(entry)}
-  {detail}
-</li>'''
+        body = e.get("body_text") or e.get("body_html")
+        if body:
+            scope = {"today": "今日", "latest": "最新一期", "requested": "按需"}.get(x.get("body_scope"), "")
+            chars = x.get("body_chars") or len(e.get("body_text") or "")
+            detail = expander("阅读全文" + (f" · {scope}" if scope else ""), f"{chars} 字",
+                              body_fragment(e, _use_rich(e)))
+        rows.append(
+            f'<li class="ar rv" style="--i:{start + k + 1}"><div class="ar-d">{dcol}</div><div>'
+            f'<h3 class="ar-t">{ext(e.get("url"), esc(e.get("title")))}</h3>'
+            + (f'<p class="ar-s">{esc(summary[:400])}</p>' if summary and not detail else
+               f'<p class="ar-s">{esc(summary[:220])}</p>' if summary else "")
+            + (f'<div class="ar-m">{"".join(meta)}</div>' if meta else "")
+            + f"{detail}</div></li>")
+    return "".join(rows)
 
 
 def render_article_panel(items: list[dict]) -> str:
-    return f'<ol class="rows">{"".join(article_row(e) for e in items)}</ol>'
-
-
-def render_list_panel(items: list[dict]) -> str:
-    rows = "".join(
-        f'''<li class="row">
-  <a class="row-title" href="{esc(e.get("url"))}" rel="noopener noreferrer">{esc(e.get("title"))}</a>
-  {meta_row(e)}
-  {f'<p class="row-sum">{linkify((e.get("summary") or "")[:240])}</p>' if (e.get("summary") or "").strip() else ""}
-</li>''' for e in items
-    )
-    return f'<ol class="rows">{rows}</ol>'
+    return f'<ol class="alist">{article_rows(items)}</ol>'
 
 
 # --------------------------------------------------------------------------
-# CSS
+# linux.do
 # --------------------------------------------------------------------------
 
-CSS = r"""
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+LINUXDO_ORDER = ["今日要闻", "头条", "AI 前线", "开源开发", "福利羊毛", "社区闲话", "站外速览", "读者评论"]
 
-:root{
-  --maxw:1200px;
-  --font:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
-  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
-  --r-sm:4px; --r-md:8px; --r-lg:14px;
-  --ease:cubic-bezier(.22,.68,.32,1);
-}
 
-:root,[data-theme="light"]{
-  --bg:#fbfaf8; --elev:#ffffff; --sunken:#f5f2ec;
-  --ink:#17171a; --ink-2:#41414a; --ink-3:#71717c; --ink-4:#a2a2ab;
-  --rule:#e8e4dd; --rule-2:#f1eee8;
-  --accent:#b8362a; --accent-fg:#ffffff; --accent-soft:#fbeeea; --accent-ink:#8a2419;
-  --shadow-1:0 1px 2px rgba(24,20,16,.05);
-  --shadow-2:0 1px 3px rgba(24,20,16,.06),0 14px 34px -22px rgba(24,20,16,.34);
-  --shadow-3:0 24px 70px -30px rgba(24,20,16,.42);
-  color-scheme:light;
-}
+def render_linuxdo_panel(items: list[dict]) -> str:
+    groups: dict[str, list[dict]] = {}
+    for e in items:
+        groups.setdefault((e.get("extra") or {}).get("section_name") or "其他", []).append(e)
+    names = [n for n in LINUXDO_ORDER if n in groups] + [n for n in groups if n not in LINUXDO_ORDER]
 
-[data-theme="dark"]{
-  --bg:#121214; --elev:#1a1a1d; --sunken:#161618;
-  --ink:#ededee; --ink-2:#c4c4c9; --ink-3:#8f8f97; --ink-4:#6a6a73;
-  --rule:#2a2a2f; --rule-2:#212125;
-  --accent:#e2614f; --accent-fg:#180f0d; --accent-soft:#2b1a16; --accent-ink:#ffa495;
-  --shadow-1:0 1px 2px rgba(0,0,0,.4);
-  --shadow-2:0 1px 3px rgba(0,0,0,.5),0 14px 34px -22px rgba(0,0,0,.8);
-  --shadow-3:0 24px 70px -30px rgba(0,0,0,.9);
-  color-scheme:dark;
-}
-
-html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
-body{
-  background:var(--bg);color:var(--ink);font-family:var(--font);
-  font-size:16px;line-height:1.75;-webkit-font-smoothing:antialiased;
-  text-rendering:optimizeLegibility;
-  transition:background-color .25s var(--ease),color .25s var(--ease);
-}
-a{color:inherit;text-decoration:none}
-a.lnk{color:var(--accent);word-break:break-all}
-time,.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
-::selection{background:var(--accent-soft);color:var(--accent-ink)}
-:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-sm)}
-
-/* ---------------- shell ---------------- */
-.top{
-  position:sticky;top:0;z-index:50;
-  background:color-mix(in srgb,var(--bg) 86%,transparent);
-  backdrop-filter:saturate(150%) blur(14px);
-  border-bottom:1px solid var(--rule);
-}
-.top-in{max-width:var(--maxw);margin:0 auto;padding:14px 28px 0}
-.top-row{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
-.brand{display:flex;align-items:baseline;gap:12px;min-width:0}
-.brand b{font-size:15px;font-weight:700;letter-spacing:-.01em;display:flex;align-items:center;gap:9px;white-space:nowrap}
-.brand b::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
-.brand span{font-family:var(--mono);font-size:11.5px;color:var(--ink-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.spacer{flex:1}
-.tools{display:flex;align-items:center;gap:8px}
-.tool{
-  display:inline-flex;align-items:center;justify-content:center;gap:7px;
-  height:32px;padding:0 11px;border:1px solid var(--rule);background:var(--elev);
-  color:var(--ink-3);font:inherit;font-size:12.5px;border-radius:var(--r-md);cursor:pointer;
-  transition:color .16s var(--ease),border-color .16s var(--ease),background-color .16s var(--ease),transform .16s var(--ease);
-}
-.tool:hover{color:var(--ink);border-color:var(--ink-4)}
-.tool:active{transform:scale(.97)}
-.tool svg{width:15px;height:15px;display:block}
-[data-theme="light"] .icon-moon,[data-theme="dark"] .icon-sun{display:none}
-.hint{font-family:var(--mono);font-size:11px;color:var(--ink-4);white-space:nowrap}
-
-/* tabs wrap — never clipped */
-.tabs{display:flex;flex-wrap:wrap;gap:5px;padding:14px 0 12px}
-.tab{
-  position:relative;display:inline-flex;align-items:center;gap:7px;
-  padding:6px 13px;border:1px solid transparent;background:transparent;
-  color:var(--ink-3);font:inherit;font-size:13.5px;border-radius:var(--r-md);cursor:pointer;
-  white-space:nowrap;transition:color .16s var(--ease),background-color .16s var(--ease),border-color .16s var(--ease);
-}
-.tab:hover{color:var(--ink);background:var(--sunken)}
-.tab .n{font-family:var(--mono);font-size:11px;color:var(--ink-4);transition:color .16s var(--ease)}
-.tab.active{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);font-weight:600}
-.tab.active .n{color:color-mix(in srgb,var(--accent-fg) 72%,transparent)}
-
-/* ---------------- layout ---------------- */
-main{max-width:var(--maxw);margin:0 auto;padding:32px 28px 120px}
-.panel{display:none}
-.panel.active{display:block}
-.panel.active>*{animation:rise .38s var(--ease) both}
-@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
-.panel-head{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;padding-bottom:16px;border-bottom:1px solid var(--rule);margin-bottom:30px}
-.panel-head h2{font-size:22px;font-weight:700;letter-spacing:-.02em;line-height:1.2}
-.panel-head .sub{font-size:12.5px;color:var(--ink-4);padding-bottom:3px}
-.panel-head .right{margin-left:auto;display:flex;gap:8px;align-items:center;padding-bottom:3px}
-.badge{display:inline-flex;align-items:center;font-family:var(--mono);font-size:10.5px;
-  padding:2px 8px;border:1px solid var(--rule);border-radius:999px;color:var(--ink-3);white-space:nowrap}
-.badge.ok{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:var(--accent-soft)}
-.badge.accent{color:var(--accent-ink);border-color:transparent;background:var(--accent-soft)}
-.empty{color:var(--ink-4);padding:16px 0}
-.section-h{display:flex;align-items:center;gap:10px;font-size:11.5px;font-weight:700;
-  letter-spacing:.16em;text-transform:uppercase;color:var(--accent);
-  padding-bottom:10px;border-bottom:1px solid var(--rule);margin:38px 0 4px}
-.section-h:first-child{margin-top:0}
-.count{font-family:var(--mono);font-size:11px;color:var(--ink-4);letter-spacing:0;font-weight:400}
-.issue{font-size:13.5px;color:var(--ink-3);padding:14px 18px;background:var(--sunken);
-  border-left:2px solid var(--accent);border-radius:0 var(--r-md) var(--r-md) 0;margin-bottom:30px}
-
-/* ---------------- digest ---------------- */
-.digest-head{padding-bottom:28px;margin-bottom:34px;border-bottom:1px solid var(--rule)}
-.headline{font-size:clamp(20px,2.7vw,28px);line-height:1.52;font-weight:600;
-  letter-spacing:-.018em;max-width:62ch;color:var(--ink)}
-.lead{position:relative;padding:0 0 34px 0;margin-bottom:6px;border-bottom:1px solid var(--rule)}
-.lead-flag{display:flex;align-items:center;gap:12px;margin-bottom:14px}
-.lead-rank{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--accent)}
-.lead-bar{flex:1;height:1px;background:linear-gradient(to right,var(--accent),transparent)}
-.lead-title{font-size:clamp(19px,2.3vw,24px);line-height:1.44;font-weight:700;letter-spacing:-.02em;margin-bottom:14px;max-width:56ch}
-.lead-summary{font-size:16px;line-height:1.85;color:var(--ink-2);max-width:64ch;margin-bottom:18px}
-.lead-meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:18px}
-.topic{font-size:11px;padding:2px 9px;border-radius:999px;background:var(--sunken);
-  color:var(--ink-3);font-family:var(--mono)}
-.why{font-size:12.5px;color:var(--ink-4)}
-.score{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--accent);
-  border:1px solid color-mix(in srgb,var(--accent) 34%,transparent);border-radius:999px;padding:1px 8px}
-.lead-refs{display:flex;flex-direction:column;gap:2px}
-.lead-src{display:flex;gap:14px;align-items:baseline;padding:8px 12px;border-radius:var(--r-md);
-  transition:background-color .16s var(--ease)}
-.lead-src:hover{background:var(--sunken)}
-.lead-src-name{font-family:var(--mono);font-size:11px;color:var(--accent);min-width:104px;flex:none}
-.lead-src-title{font-size:13px;color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-
-.items{list-style:none}
-.item{display:flex;gap:20px;padding:24px 0;border-bottom:1px solid var(--rule-2)}
-.item:last-child{border-bottom:0}
-.item-rank{font-family:var(--mono);font-size:12px;color:var(--ink-4);padding-top:4px;flex:none;min-width:24px}
-.item-main{flex:1;min-width:0}
-.item-title{font-size:17px;font-weight:600;line-height:1.5;letter-spacing:-.01em;margin-bottom:8px}
-.item-summary{font-size:14.5px;line-height:1.8;color:var(--ink-2);max-width:66ch;margin-bottom:10px}
-.item-meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
-.item-score{font-family:var(--mono);font-size:11px;color:var(--ink-4)}
-.item-srcs{display:flex;gap:8px;flex-wrap:wrap;font-family:var(--mono);font-size:11px}
-.item-srcs a{color:var(--accent);opacity:.85}
-.item-srcs a:hover{opacity:1;text-decoration:underline}
-.themes{margin-top:48px;padding-top:8px;border-top:1px solid var(--rule)}
-.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-top:20px}
-.theme{padding:18px 20px;background:var(--elev);border:1px solid var(--rule);border-radius:var(--r-lg);
-  box-shadow:var(--shadow-1);transition:transform .2s var(--ease),box-shadow .2s var(--ease),border-color .2s var(--ease)}
-.theme:hover{transform:translateY(-2px);box-shadow:var(--shadow-2);border-color:var(--ink-4)}
-.theme-name{font-size:14px;font-weight:700;margin-bottom:7px;color:var(--accent-ink)}
-.theme-sum{font-size:13.5px;line-height:1.75;color:var(--ink-3)}
-.theme-refs{display:flex;gap:8px;flex-wrap:wrap;margin-top:11px;font-family:var(--mono);font-size:10.5px}
-.theme-refs a{color:var(--ink-4)}
-.theme-refs a:hover{color:var(--accent)}
-.note{margin-top:34px;font-size:13px;color:var(--ink-4);font-style:italic}
-.byline{margin-top:8px;font-family:var(--mono);font-size:11px;color:var(--ink-4)}
-
-/* ---------------- telegram ---------------- */
-.tg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(308px,1fr));gap:16px;align-items:start}
-.tg{
-  background:var(--elev);border:1px solid var(--rule);border-radius:var(--r-lg);
-  padding:15px;box-shadow:var(--shadow-1);display:flex;flex-direction:column;gap:11px;
-  animation:cardIn .42s var(--ease) both;animation-delay:calc(var(--i) * 14ms);
-  transition:border-color .2s var(--ease),box-shadow .2s var(--ease),transform .2s var(--ease);
-}
-@keyframes cardIn{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
-@media(hover:hover){.tg:hover{border-color:var(--ink-4);box-shadow:var(--shadow-2);transform:translateY(-2px)}}
-.tg-head{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:11px;color:var(--ink-4)}
-.tg-ch{color:var(--accent);font-weight:700}
-.tg-ch:hover{text-decoration:underline}
-.tg-head time{color:var(--ink-4)}
-.tg-id{margin-left:auto;color:var(--ink-4)}
-.tg-id:hover{color:var(--accent)}
-.shots{display:grid;gap:5px;border-radius:var(--r-md);overflow:hidden;background:var(--sunken)}
-.shots.n1{grid-template-columns:1fr}
-.shots.n2{grid-template-columns:1fr 1fr}
-.shots.n3{grid-template-columns:1fr 1fr}
-.shots.n3 img:first-child{grid-row:span 2}
-.shots img{width:100%;height:100%;object-fit:cover;display:block;min-height:0;max-height:340px}
-.shots.n2 img,.shots.n3 img{max-height:150px}
-.tg-lead{font-size:15px;font-weight:700;line-height:1.5;color:var(--ink);letter-spacing:-.005em}
-.tg-text{font-size:14px;line-height:1.78;color:var(--ink-2);overflow-wrap:anywhere}
-.tg-foot{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-top:auto}
-.rx{display:flex;gap:5px;flex-wrap:wrap;margin-left:auto}
-.rx span{font-family:var(--mono);font-size:10.5px;padding:1px 6px;border:1px solid var(--rule);
-  border-radius:999px;color:var(--ink-3)}
-.ghost-btn{
-  align-self:flex-start;font:inherit;font-size:12px;color:var(--accent);
-  background:transparent;border:1px dashed color-mix(in srgb,var(--accent) 40%,transparent);
-  border-radius:var(--r-md);padding:6px 12px;cursor:pointer;
-  transition:background-color .16s var(--ease),border-color .16s var(--ease);
-}
-.ghost-btn:hover{background:var(--accent-soft);border-color:var(--accent)}
-
-/* ---------------- rows / articles ---------------- */
-.rows{list-style:none}
-.row{padding:17px 0;border-bottom:1px solid var(--rule-2)}
-.row:last-child{border-bottom:0}
-.row-title{font-size:15.5px;font-weight:600;line-height:1.5;display:block;transition:color .16s var(--ease)}
-.row-title:hover{color:var(--accent)}
-.row-sum{font-size:13.5px;line-height:1.75;color:var(--ink-3);margin-top:7px;max-width:76ch}
-.meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-family:var(--mono);
-  font-size:11px;color:var(--ink-4);margin-top:7px}
-.meta time{color:var(--ink-4)}
-.meta .src{color:var(--ink-4);opacity:.75}
-.chip{font-size:10.5px;padding:1px 7px;border:1px solid var(--rule);border-radius:999px;color:var(--ink-3)}
-.chip.accent{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 30%,transparent)}
-.group{margin-top:34px}
-
-.feature{background:var(--elev);border:1px solid var(--rule);border-radius:var(--r-lg);
-  padding:32px;margin-bottom:34px;box-shadow:var(--shadow-1)}
-.feature-head{padding-bottom:20px;margin-bottom:24px;border-bottom:1px solid var(--rule)}
-.kicker{font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;
-  color:var(--accent);display:block;margin-bottom:11px}
-.feature-head h3{font-size:22px;line-height:1.42;font-weight:700;letter-spacing:-.02em;margin-bottom:12px;max-width:52ch}
-.feature-head h3 a:hover{color:var(--accent)}
-.feature-body{max-width:70ch}
-.blk{margin-bottom:26px}
-.blk h4,.h{font-size:14.5px;font-weight:700;color:var(--accent-ink);margin-bottom:10px;line-height:1.5}
-.blk p,.article p{font-size:15.5px;line-height:1.9;color:var(--ink-2);margin-bottom:14px}
-.blk p:last-child,.article p:last-child{margin-bottom:0}
-
-/* smooth disclosure: real height animation, no display flip */
-.exp{margin-top:11px}
-.exp-btn{
-  display:inline-flex;align-items:center;gap:8px;font:inherit;font-family:var(--mono);font-size:11.5px;
-  color:var(--accent);background:transparent;border:0;padding:0;cursor:pointer;
-  transition:opacity .16s var(--ease);
-}
-.exp-btn:hover{opacity:.7}
-.exp-icon{width:0;height:0;border-left:5px solid currentColor;border-top:4px solid transparent;
-  border-bottom:4px solid transparent;transition:transform .26s var(--ease);flex:none}
-.exp.open .exp-icon{transform:rotate(90deg)}
-.exp-count{color:var(--ink-4)}
-.exp-body{display:grid;grid-template-rows:0fr;transition:grid-template-rows .34s var(--ease)}
-.exp.open .exp-body{grid-template-rows:1fr}
-.exp-inner{overflow:hidden;min-height:0}
-.exp-inner>.article,.exp-inner>.blk{margin-top:18px;padding-left:18px;border-left:2px solid var(--rule)}
-
-/* ---------------- overlay ---------------- */
-.overlay{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;
-  padding:24px;background:color-mix(in srgb,#000 52%,transparent);
-  backdrop-filter:blur(6px);opacity:0;pointer-events:none;transition:opacity .22s var(--ease)}
-.overlay.open{opacity:1;pointer-events:auto}
-.ov-panel{background:var(--elev);border:1px solid var(--rule);border-radius:var(--r-lg);
-  box-shadow:var(--shadow-3);width:min(760px,100%);max-height:min(84vh,900px);
-  display:flex;flex-direction:column;transform:translateY(14px) scale(.985);
-  transition:transform .26s var(--ease)}
-.overlay.open .ov-panel{transform:none}
-.ov-head{display:flex;align-items:center;gap:14px;padding:18px 22px;border-bottom:1px solid var(--rule);flex:none}
-.ov-head h3{font-size:15px;font-weight:700}
-.ov-close{margin-left:auto;width:30px;height:30px;display:grid;place-items:center;border:1px solid var(--rule);
-  background:transparent;color:var(--ink-3);border-radius:var(--r-md);cursor:pointer;font-size:16px;line-height:1;
-  transition:color .16s var(--ease),border-color .16s var(--ease),transform .16s var(--ease)}
-.ov-close:hover{color:var(--ink);border-color:var(--ink-4)}
-.ov-close:active{transform:scale(.94)}
-.ov-body{padding:22px;overflow-y:auto;overscroll-behavior:contain}
-.ov-title{font-size:15px;font-weight:700;margin-bottom:6px}
-.ov-note{font-size:12.5px;color:var(--ink-4);margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--rule-2)}
-.orig{padding:15px 0;border-bottom:1px solid var(--rule-2)}
-.orig:last-child{border-bottom:0}
-.orig-head{display:flex;align-items:center;gap:11px;font-family:var(--mono);font-size:11px;
-  color:var(--ink-4);margin-bottom:9px;flex-wrap:wrap}
-.orig-ch{color:var(--accent);font-weight:700}
-.orig-head a{margin-left:auto;color:var(--ink-4)}
-.orig-head a:hover{color:var(--accent)}
-.orig-text{font-size:14px;line-height:1.8;color:var(--ink-2);overflow-wrap:anywhere}
-
-footer{max-width:var(--maxw);margin:0 auto;padding:0 28px 90px;color:var(--ink-4);font-size:12.5px;line-height:2}
-footer code{font-family:var(--mono);color:var(--ink-3)}
-
-@media(max-width:700px){
-  .top-in,main,footer{padding-left:16px;padding-right:16px}
-  /* the wrapped tab strip would be tall on a phone; let it scroll away instead
-     of pinning a large header over the content */
-  .top{position:static}
-  .top-in{padding-top:16px}
-  .hint{display:none}
-  .feature{padding:22px}
-  .tg-grid{grid-template-columns:1fr}
-  .item{gap:14px}
-  .lead-src-name{min-width:0}
-  .lead-src{flex-direction:column;gap:3px}
-  .theme{padding:16px}
-}
-@media(prefers-reduced-motion:reduce){
-  *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;
-    transition-duration:.001ms!important;scroll-behavior:auto!important}
-}
-"""
+    secs, links, k = [], [], 0
+    for idx, name in enumerate(names, 1):
+        sid = f"ld-{idx}"
+        rows = []
+        for e in groups[name]:
+            k += 1
+            s = (e.get("summary") or "").strip()
+            rows.append(f'<li class="tp rv" style="--i:{k}"><h3 class="tp-t">{ext(e.get("url"), esc(e.get("title")))}</h3>'
+                        + (f'<p class="tp-s">{esc(s)}</p>' if s else "") + "</li>")
+        secs.append(f'<section class="sec" id="{sid}"><h2 class="sec-h">{esc(name)}<span class="n">{len(groups[name])}</span></h2>'
+                    f'<ol class="topics">{"".join(rows)}</ol></section>')
+        links.append((sid, name, len(groups[name])))
+    return with_rail(rail(links, "spy", "板块"), "".join(secs))
 
 
 # --------------------------------------------------------------------------
-# JS
+# 少数派
 # --------------------------------------------------------------------------
 
-JS = r"""
-(function(){
-  var root=document.documentElement;
+def render_sspai_panel(items: list[dict]) -> str:
+    features = [e for e in items if "派早报" in (e.get("title") or "") and (e.get("sections") or e.get("body_text"))]
+    others = [e for e in items if e not in features]
+    secs, links = [], []
 
-  /* ---- theme: system default, manual override persisted ---- */
-  var KEY='digest-theme';
-  function stored(){ try{ return localStorage.getItem(KEY); }catch(e){ return null; } }
-  function save(v){ try{ localStorage.setItem(KEY,v); }catch(e){} }
-  var saved=stored();
-  if(saved==='light'||saved==='dark'){
-    root.dataset.theme=saved;
-  }else{
-    root.dataset.theme=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
-  }
-  var toggle=document.querySelector('.theme-toggle');
-  if(toggle){
-    toggle.addEventListener('click',function(){
-      var next=root.dataset.theme==='dark'?'light':'dark';
-      root.dataset.theme=next; save(next);
-      toggle.setAttribute('aria-label',next==='dark'?'切换到浅色':'切换到深色');
-    });
-  }
+    for fi, e in enumerate(features, 1):
+        rich = _use_rich(e)
+        date, tm = stamp(e)
+        sections = [s for s in (e.get("sections") or []) if (s.get("text") or s.get("html"))]
+        head = (f'<header class="feat-h rv"><span class="kicker">派早报</span>'
+                f'<h2>{ext(e.get("url"), esc(e.get("title")))}</h2>'
+                f'<div class="ar-m"><span>{esc(date)} {esc(tm)}</span>'
+                + (f'<span>{esc(e["author"])}</span>' if e.get("author") else "")
+                + f'<span>{len(sections) or 1} 条</span></div></header>')
+        secs.append(f'<section class="sec" id="sp-f{fi}">{head}</section>')
+        links.append((f"sp-f{fi}", "派早报" if len(features) == 1 else f"派早报 {fi}", None))
+        if sections:
+            for si, s in enumerate(sections, 1):
+                sid = f"sp-f{fi}-{si}"
+                title = s.get("title") or f"第 {si} 条"
+                secs.append(f'<section class="sec blk rv" style="--i:{si}" id="{sid}">'
+                            f'<h3 class="blk-h"><span class="no">{si:02d}</span>{esc(title)}</h3>'
+                            f'<div class="prose">{body_fragment(s, rich)}</div></section>')
+                links.append((sid, title, None))
+        else:
+            secs.append(f'<section class="sec blk"><div class="prose">{body_fragment(e, rich)}</div></section>')
 
-  /* ---- tabs ---- */
-  var tabs=[].slice.call(document.querySelectorAll('.tab'));
-  var panels=[].slice.call(document.querySelectorAll('.panel'));
-  function show(id,push){
-    tabs.forEach(function(t){ t.classList.toggle('active',t.dataset.tab===id); });
-    panels.forEach(function(p){ p.classList.toggle('active',p.id==='panel-'+id); });
-    if(push!==false && history.replaceState) history.replaceState(null,'','#'+id);
-  }
-  tabs.forEach(function(t){
-    t.addEventListener('click',function(){
-      show(t.dataset.tab);
-      window.scrollTo({top:0,behavior:'smooth'});
-    });
-  });
-  document.addEventListener('keydown',function(e){
-    var tag=(e.target.tagName||'').toUpperCase();
-    if(tag==='INPUT'||tag==='TEXTAREA'||e.metaKey||e.ctrlKey||e.altKey) return;
-    if(e.key==='ArrowRight'||e.key==='ArrowLeft'){
-      var cur=tabs.findIndex(function(t){return t.classList.contains('active');});
-      var next=cur+(e.key==='ArrowRight'?1:-1);
-      if(next>=0&&next<tabs.length){ show(tabs[next].dataset.tab); e.preventDefault(); }
-      return;
-    }
-    var n=parseInt(e.key,10);
-    if(n>=1&&n<=9&&tabs[n-1]){ show(tabs[n-1].dataset.tab); return; }
-    if(n===0&&tabs[9]){ show(tabs[9].dataset.tab); }
-  });
-  var h=location.hash.slice(1);
-  if(h&&document.getElementById('panel-'+h)) show(h,false);
+    if others:
+        secs.append(f'<section class="sec" id="sp-others"><h2 class="sec-h">近期文章<span class="n">{len(others)}</span></h2>'
+                    f'<ol class="alist">{article_rows(others)}</ol></section>')
+        links.append(("sp-others", "近期文章", len(others)))
 
-  /* ---- smooth disclosure ---- */
-  document.addEventListener('click',function(e){
-    var btn=e.target.closest('.exp-btn');
-    if(!btn) return;
-    var wrap=btn.closest('.exp');
-    var open=wrap.classList.toggle('open');
-    btn.setAttribute('aria-expanded',open?'true':'false');
-  });
-
-  /* ---- overlay for AI-merge originals ---- */
-  var overlay=document.getElementById('overlay');
-  var ovBody=overlay&&overlay.querySelector('.ov-body');
-  var lastFocus=null;
-  function openOverlay(id){
-    var tpl=document.getElementById(id);
-    if(!tpl||!overlay) return;
-    lastFocus=document.activeElement;
-    ovBody.innerHTML='';
-    ovBody.appendChild(tpl.content.cloneNode(true));
-    overlay.classList.add('open');
-    overlay.setAttribute('aria-hidden','false');
-    document.body.style.overflow='hidden';
-    var close=overlay.querySelector('.ov-close');
-    if(close) close.focus();
-  }
-  function closeOverlay(){
-    if(!overlay) return;
-    overlay.classList.remove('open');
-    overlay.setAttribute('aria-hidden','true');
-    document.body.style.overflow='';
-    if(lastFocus&&lastFocus.focus) lastFocus.focus();
-  }
-  document.addEventListener('click',function(e){
-    var trigger=e.target.closest('[data-overlay]');
-    if(trigger){ openOverlay(trigger.dataset.overlay); return; }
-    if(e.target.closest('.ov-close')){ closeOverlay(); return; }
-    if(e.target===overlay){ closeOverlay(); }
-  });
-  document.addEventListener('keydown',function(e){
-    if(e.key==='Escape') closeOverlay();
-  });
-})();
-"""
+    content = f'<div class="feat">{"".join(secs)}</div>'
+    return with_rail(rail(links, "spy", "目录"), content) if len(links) > 1 else content
 
 
 # --------------------------------------------------------------------------
-# page skeleton
+# page
 # --------------------------------------------------------------------------
 
 PAGE = """<!doctype html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light dark">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0b0b0c">
 <title>__TITLE__</title>
+<script>document.documentElement.classList.add("js")</script>
 <style>__CSS__</style>
 </head>
 <body>
-<header class="top">
-  <div class="top-in">
-    <div class="top-row">
-      <div class="brand"><b>每日摘要</b><span>__STATS__</span></div>
-      <div class="spacer"></div>
-      <div class="tools">
-        <span class="hint">1–9 切换 · ←→ 翻页</span>
-        <button class="tool theme-toggle" type="button" aria-label="切换主题">
-          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-            <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/>
-          </svg>
-          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/>
-          </svg>
-        </button>
-      </div>
+<header class="hd">
+  <div class="hd-in">
+    <div class="hd-top">
+      <span class="brand">Daily Brief</span>
+      <span class="hd-date">__DATE__</span>
+      <span class="hd-stats">__STATS__</span>
+      <span class="hd-keys"><kbd>1</kbd>–<kbd>9</kbd> 切换 <kbd>←</kbd><kbd>→</kbd> 翻页</span>
     </div>
-    <nav class="tabs" role="tablist">__TABS__</nav>
+    __TABS__
   </div>
 </header>
 <main>__PANELS__</main>
-<div class="overlay" id="overlay" aria-hidden="true" role="dialog" aria-modal="true">
-  <div class="ov-panel">
-    <div class="ov-head"><h3>原始消息</h3><button class="ov-close" type="button" aria-label="关闭">✕</button></div>
-    <div class="ov-body"></div>
+<footer class="ft">
+  <span>本地生成 <code>__GENERATED__</code></span>
+  <span>每条保留原始链接与时间戳；「AI 合并」条目可对照原始消息</span>
+</footer>
+<div class="ov" id="ov" aria-hidden="true" role="dialog" aria-modal="true" aria-label="详情">
+  <div class="ov-p">
+    <div class="ov-h"><h2></h2><button class="ov-x" type="button" aria-label="关闭">__X__</button></div>
+    <div class="ov-b"></div>
   </div>
 </div>
-<footer>
-  本地生成 · <code>tools/collect.py</code> → <code>tools/ai_apply.py</code> → <code>tools/render_digest.py</code><br>
-  每条保留原始链接与时间戳。摘要为原文摘录；标注「AI 合并」的条目可查看原始消息核对。
-</footer>
 <script>__JS__</script>
 </body>
 </html>
 """
 
 
+def _asset(name: str) -> str:
+    return (ASSETS / name).read_text(encoding="utf-8")
+
+
 def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: bool) -> str:
-    base_dir = output.parent
-    names = [n for n in ORDER if n in sources]
+    names = [n for n in ORDER if n in sources] + sorted(n for n in sources if n not in ORDER)
+    day = next((sources[n].get("day") for n in names if sources[n].get("day")), "") or \
+        datetime.now(CST).date().isoformat()
+    _CTX["day"] = str(day)[:10]
     total = sum(len(sources[n].get("items") or []) for n in names)
-    day = (sources[names[0]].get("day") if names else "") or ""
     updated = sum(1 for n in names if (sources[n].get("status") or {}).get("updated_today"))
 
     tabs, panels = [], []
-    first = True
+
+    def add(key: str, label: str, count: int, fresh: bool, body: str):
+        tabs.append(f'<button class="tab" role="tab" type="button" id="t-{esc(key)}" data-tab="{esc(key)}" '
+                    f'aria-controls="p-{esc(key)}" aria-selected="false" tabindex="-1">{esc(label)}'
+                    f'<span class="n">{count}</span>' + ('<span class="fresh" aria-hidden="true"></span>' if fresh else "")
+                    + "</button>")
+        panels.append(f'<section class="panel" role="tabpanel" id="p-{esc(key)}" aria-labelledby="t-{esc(key)}">{body}</section>')
 
     if digest and digest.get("cards"):
-        tabs.append(f'<button class="tab active" role="tab" data-tab="digest">今日汇总'
-                    f'<span class="n">{len(digest["cards"])}</span></button>')
-        panels.append('<section class="panel active" id="panel-digest">'
-                      '<div class="panel-head"><h2>今日汇总</h2>'
-                      '<span class="sub">AI 跨源合并与排序</span>'
-                      '<div class="right"><span class="badge accent">AI 处理</span></div></div>'
-                      f'{render_digest_panel(digest)}</section>')
-        first = False
+        model = digest.get("model") or ""
+        add("digest", "今日汇总", len(digest["cards"]), True,
+            panel_head("今日汇总", "跨源合并与排序" + (f" · {model}" if model else ""), None)
+            + render_digest_panel(digest))
 
     for name in names:
         payload = sources[name]
         items = payload.get("items") or []
-        label, sub = SOURCE_META.get(name, (name, ""))
+        label, sub = SOURCE_META.get(name, (payload.get("source_name") or name, ""))
         status = payload.get("status") or {}
+        extra_meta = ""
 
         if name == "telegram":
-            body = render_telegram_panel(items, embed, base_dir)
+            body = render_telegram_panel(items, embed, output.parent)
+            sub = f"{sub} · {len({(e.get('extra') or {}).get('channel') for e in items})} 个频道"
         elif name == "linuxdo":
+            issue = next(((e.get("extra") or {}).get("issue_title") for e in items
+                          if (e.get("extra") or {}).get("issue_title")), "")
+            sub = re.sub(r"\s*·\s*linux\.do 晚报\s*$", "", issue) or sub
             body = render_linuxdo_panel(items)
         elif name == "sspai":
             body = render_sspai_panel(items)
-        elif name in ("latepost", "geekpark", "ruanyifeng", "anywayfm"):
-            body = render_article_panel(items)
+        elif name == "hackernews":
+            body = render_hn_board(items)
+        elif name == "weibo":
+            body = render_weibo_board(items)
+            if items:
+                extra_meta = f'<span><span class="k">抓取 </span><span class="v">{esc(fmt_time(items[0].get("published_at")))}</span></span>'
+                status = {k: v for k, v in status.items() if k != "latest_published_at"}
+        elif name == "zhihu":
+            body = render_zhihu_board(items)
         else:
-            body = render_list_panel(items)
+            body = render_article_panel(items)
 
-        active = " active" if first else ""
-        first = False
-        tabs.append(f'<button class="tab{active}" role="tab" data-tab="{esc(name)}">{esc(label)}'
-                    f'<span class="n">{len(items)}</span></button>')
-        panels.append(f'''<section class="panel{active}" id="panel-{esc(name)}">
-  <div class="panel-head"><h2>{esc(label)}</h2><span class="sub">{esc(sub)}</span>
-    <div class="right">{freshness(status)}</div></div>
-  {body or '<p class="empty">无数据</p>'}
-</section>''')
+        add(name, label, len(items), bool(status.get("updated_today")),
+            panel_head(PANEL_TITLE.get(name, label), sub, status, extra_meta)
+            + (body if items else '<p class="empty">今日无数据</p>'))
 
-    stats = f'{fmt_day(day)} · {total} 条 · {updated}/{len(names)} 源今日更新'
+    tab_html = scroller("".join(tabs) + '<span class="tab-ink" aria-hidden="true"></span>', "tabs", "信源")
+    tab_html = tab_html.replace('<div class="scroller-track" aria-label="信源">',
+                                '<div class="scroller-track" role="tablist" aria-label="信源">')
+    stats = f'<b>{total}</b> 条 · <b>{updated}</b>/{len(names)} 源今日更新'
     return (PAGE
-            .replace("__TITLE__", esc(f"每日摘要 · {fmt_day(day)}"))
-            .replace("__CSS__", CSS)
-            .replace("__JS__", JS)
-            .replace("__STATS__", esc(stats))
-            .replace("__TABS__", "".join(tabs))
+            .replace("__TITLE__", esc(f"Daily Brief · {fmt_day(day)}"))
+            .replace("__CSS__", _asset("digest.css"))
+            .replace("__JS__", _asset("digest.js"))
+            .replace("__DATE__", esc(fmt_day(day)))
+            .replace("__STATS__", stats)
+            .replace("__TABS__", tab_html)
+            .replace("__X__", ICON["x"])
+            .replace("__GENERATED__", esc(datetime.now(CST).strftime("%Y-%m-%d %H:%M")))
             .replace("__PANELS__", "".join(panels)))
 
 
@@ -1111,7 +1070,7 @@ def main() -> int:
     indir = args.indir if args.indir.exists() else args.fallback
     sources: dict[str, dict] = {}
     for path in sorted(indir.glob("*.json")):
-        if path.name in ("index.json", "digest.json"):
+        if path.name in ("index.json", "digest.json", "telegram_duplicate_groups.json"):
             continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
