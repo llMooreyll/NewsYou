@@ -1,0 +1,63 @@
+name: probe
+
+# TEMPORARY diagnostic: can a GitHub-hosted runner reach the ten sources?
+# Delete this file once the question is answered.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Where is this runner?
+        run: |
+          echo "runner: $(uname -a)"
+          curl -s https://ipinfo.io/json | head -20
+
+      - name: Reachability of each endpoint
+        run: |
+          probe () {  # name url [extra curl args...]
+            local name="$1" url="$2"; shift 2
+            local out
+            out=$(curl -sS -o /dev/null -m 25 -w '%{http_code} %{time_total}s %{size_download}B' "$@" "$url" 2>&1)
+            printf '  %-12s %-46s %s\n' "$name" "$url" "$out"
+          }
+          echo "=== probe (HTTP code / total time / bytes) ==="
+          probe sspai-feed    https://sspai.com/feed
+          probe sspai-api     "https://sspai.com/api/v1/articles?limit=50&offset=0"
+          probe telegram      https://t.me/s/MaiTungNews
+          probe linuxdo       https://linuxdo.club/issues/
+          probe latepost      https://www.latepost.com/site/index \
+                              -X POST -H 'X-Requested-With: XMLHttpRequest' \
+                              -H 'Content-Type: application/x-www-form-urlencoded' \
+                              --data 'page=1&limit=20'
+          probe geekpark      https://www.geekpark.net/rss
+          probe ruanyifeng    https://www.ruanyifeng.com/blog/atom.xml
+          probe anywayfm      https://anyway.fm/now/
+          probe hackernews    https://hacker-news.firebaseio.com/v0/topstories.json
+          probe weibo         https://weibo.com/ajax/side/hotSearch -H 'Referer: https://weibo.com/'
+          probe zhihu         "https://api.zhihu.com/topstory/hot-list?limit=50"
+
+      - name: Real collection (the decisive test)
+        run: |
+          python3 -m pip install -q -r requirements.txt
+          echo "=== tools/collect.py --all --no-images ==="
+          python3 tools/collect.py --all --outdir /tmp/collected --aidir /tmp/ai \
+            --no-images --no-ai-input 2>&1 | tail -45
+          echo
+          echo "=== per-source item counts ==="
+          python3 - <<'PY'
+          import json, pathlib
+          p = pathlib.Path("/tmp/collected/index.json")
+          if not p.exists():
+              print("no index.json written")
+              raise SystemExit(0)
+          index = json.loads(p.read_text())
+          for name, info in index["sources"].items():
+              ok = "ok" if info.get("ok") else "FAILED"
+              print(f'  {name:<12} {info.get("count", 0):>4} items  {ok}  '
+                    f'{info.get("error", "")}')
+          print(f'  total {sum(i.get("count",0) for i in index["sources"].values())} items')
+          PY
