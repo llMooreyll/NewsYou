@@ -1,0 +1,123 @@
+# Newsletter pipeline configuration.
+#
+# Every value here is also a built-in default, so deleting any line changes
+# nothing. Precedence, highest first:
+#
+#     CLI flag  >  NEWSLETTER_* env var  >  this file  >  built-in default
+#
+# See what is actually in effect, and where each value came from:
+#
+#     make config
+#     ./.venv/bin/python tools/collect.py --show-config
+#
+# Unknown keys are rejected, so a typo fails loudly instead of doing nothing.
+
+[ai]
+# Backend CLI for the two AI stages. "none" skips the model entirely, which is
+# the only way to turn the AI layer off.
+# Adding a backend is one entry in tools/ai_model.py BACKEND_TABLE.
+backend = "pi"
+# Model passed to the backend. For pi this is any id from `pi --list-models`.
+# Leave empty to let the backend choose its own default.
+model = "deepseek-v4.1-flash"
+# Seconds before a backend call is abandoned.
+timeout = 900
+# Reuse an existing data/ai/*_decisions.json instead of calling the model again.
+# Set false (or pass --ai-force) to force a fresh call.
+reuse = true
+# Extra arguments appended to the backend command, just before the prompt.
+# An escape hatch for backend-specific tuning; normally empty.
+args = []
+
+[collect]
+# Extraction engine:
+#   modern  trafilatura + feedparser; keeps inline links and headings (default)
+#   legacy  standard library only; hand-rolled regex, no dependencies
+engine = "modern"
+# Full-text policy for article bodies:
+#   today   only items published today get their body fetched (default)
+#   latest  the most recent items, regardless of date
+#   all     every item
+#   none    never fetch bodies
+#   <N>     the N most recent items
+fulltext = "today"
+# Download Telegram post images. They are inlined into the digest as base64.
+images = true
+images_per_post = 2
+image_cap = 200
+# Global per-source item limit. 0 means "use sources.limits below".
+limit = 0
+
+[telegram]
+# Public channels to follow. Adding one is a single string; no code change.
+channels = ["MaiTungNews", "tnews365", "zaihuapd", "xhqcankao",
+            "GodlyNews1", "NewlearnerChannel", "DNSPODT"]
+# Pages of roughly 20 posts to walk per channel.
+pages = 4
+# Which day's messages to keep: auto | today | yesterday | YYYY-MM-DD.
+# "auto" picks the newest day any channel actually posted in.
+day = "auto"
+
+[hackernews]
+# topstories | beststories | newstories | askstories | showstories
+feed = "topstories"
+
+[sources]
+# Panel order. Purely ordering: every registered source still runs, and any not
+# named here is appended in its built-in position. To actually turn a source
+# off, list the ones you want in `enabled` below.
+order = ["sspai", "telegram", "linuxdo", "latepost", "geekpark",
+         "ruanyifeng", "anywayfm", "hackernews", "weibo", "zhihu"]
+# Optional whitelist: when non-empty, only these sources are collected.
+# Empty means "everything in order".
+enabled = []
+
+# Per-source item limits.
+[sources.limits]
+sspai = 20
+telegram = 400
+linuxdo = 300
+latepost = 15
+geekpark = 15
+ruanyifeng = 10
+anywayfm = 10
+hackernews = 15
+weibo = 15
+zhihu = 15
+
+# Panel display names.
+[sources.labels]
+sspai = "少数派"
+telegram = "Telegram"
+linuxdo = "linux.do 晚报"
+latepost = "晚点 LatePost"
+geekpark = "极客公园"
+ruanyifeng = "阮一峰的网络日志"
+anywayfm = "Anyway.Now 安妮薇看看"
+hackernews = "Hacker News"
+weibo = "微博热搜"
+zhihu = "知乎热榜"
+
+[output]
+# Where the single-file digest is written.
+digest = "site/digest.html"
+
+[archive]
+# Root directory for daily snapshots. Git-ignored.
+root = "archive"
+
+[paths]
+collected = "data/collected"
+ai = "data/ai"
+processed = "data/processed"
+
+# Generic RSS/Atom sources. Each entry needs an id and a url; adding one requires
+# no code. For sites that need special handling (fallback APIs, URL rewriting,
+# non-RSS list pages) keep using a module in tools/collectors/ instead.
+#
+# [[feeds]]
+# id       = "example-blog"
+# name     = "示例博客"
+# url      = "https://example.com/feed.xml"
+# fulltext = "today"
+# limit    = 20

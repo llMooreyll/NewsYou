@@ -5,13 +5,23 @@ The pipeline never talks to a model API directly. It shells out to a local CLI,
 so credentials and model choice stay in the user's own tool configuration.
 
     pi     (default) the local `pi` CLI in non-interactive print mode, using
-           DEFAULT_MODEL unless --ai-model says otherwise
+           DEFAULT_MODEL unless the model is overridden
     none   no model call at all — the pipeline runs end to end and the digest
            simply has no AI layer
 
-Only `pi` is implemented. Adding another backend means adding one entry to
-BACKENDS and one branch in `_invoke`; nothing else in the pipeline changes,
-because a backend only has to turn (prompt, input JSON) into (output JSON).
+Why a backend is more than (name, model)
+-----------------------------------------
+Two fields are enough to *identify* what to run but not to *build the command*:
+every CLI spells non-interactive mode, isolation and model selection
+differently.
+
+    pi    -p --no-session --no-tools --no-context-files --model <m> "<prompt>"
+    codex exec --skip-git-repo-check --sandbox read-only --model <m> "<prompt>"
+
+So the command shape lives in one declarative record per backend (BACKEND_TABLE
+below) rather than in scattered conditionals. Adding a backend is one entry
+there plus, if its input plumbing differs, one line in `_invoke`; nothing else
+in the pipeline changes.
 
 How the call is made
 --------------------
@@ -37,9 +47,9 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
-BACKENDS = ("none", "pi")
 DEFAULT_BACKEND = "pi"
 DEFAULT_MODEL = "deepseek-v4.1-flash"
 
@@ -49,9 +59,67 @@ PI_PROMPT = ("Read the `instructions` field in the input and follow it exactly. 
              "Return only the JSON object described by `response_schema`, "
              "with no prose and no markdown fence.")
 
-PI_BASE_FLAGS = ("-p", "--no-session", "--no-tools", "--no-context-files")
-
 DEFAULT_TIMEOUT = 900
+
+
+# --------------------------------------------------------------------------
+# Backend profiles
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Backend:
+    """How to drive one CLI.
+
+    `base_args` are the flags that make the tool non-interactive and isolated
+    from the user's own configuration — for pi these are not optional: without
+    --no-context-files the user's global AGENTS.md is loaded, which instructs
+    the model to answer in English and append a "> Recap:" block, and both
+    corrupt the JSON.
+
+    `prompt` is the text handed to the tool; the real prompt lives in the input
+    JSON, so this only points the model at it.
+    """
+    name: str
+    exe: str
+    base_args: tuple[str, ...]
+    model_flag: str | None = None       # None = the CLI has no model selection
+    experimental: bool = False          # selected only if explicitly asked for
+    notes: str = ""
+
+
+BACKEND_TABLE: dict[str, Backend] = {
+    "pi": Backend(
+        name="pi",
+        exe="pi",
+        base_args=("-p", "--no-session", "--no-tools", "--no-context-files"),
+        model_flag="--model",
+        notes="pi CLI, non-interactive print mode",
+    ),
+    # Kept as a worked example of the extension point, and gated: `available()`
+    # refuses it unless the binary exists and the caller names it explicitly.
+    # Verify the flags against your codex version before trusting the output.
+    "codex": Backend(
+        name="codex",
+        exe="codex",
+        base_args=("exec", "--skip-git-repo-check", "--sandbox", "read-only"),
+        model_flag="--model",
+        experimental=True,
+        notes="Codex CLI, non-interactive exec mode (flags unverified)",
+    ),
+}
+
+BACKENDS = ("none", *BACKEND_TABLE)
+
+# What the model is told, per backend. The prompt is the same everywhere; only
+# the wrapper differs, and it stays short because the real prompt is in the
+# input JSON.
+PROMPT_ARG = PI_PROMPT
+
+
+def profile(name: str) -> Backend | None:
+    """The profile for a backend name, or None for `none`/unknown."""
+    return BACKEND_TABLE.get(name)
+
 
 class ModelError(RuntimeError):
     pass
@@ -64,16 +132,23 @@ def available(backend: str) -> tuple[bool, str]:
     """Return (ok, reason). Checked before a run so failures are clear."""
     if backend in ("none", "", None):
         return True, ""
-    if backend == "pi":
-        if not shutil.which("pi"):
-            return False, "backend 'pi' needs the pi CLI on PATH"
-        return True, ""
-    return False, f"unknown AI backend {backend!r} (known: {', '.join(BACKENDS)})"
+    prof = profile(backend)
+    if prof is None:
+        return False, (f"unknown AI backend {backend!r} "
+                       f"(known: {', '.join(BACKENDS)})")
+    if not shutil.which(prof.exe):
+        return False, f"backend {backend!r} needs the {prof.exe!r} CLI on PATH"
+    return True, ""
+
 
 def resolve_backend(requested: str) -> tuple[str, str]:
     """Return (backend to use, warning). Unknown or unusable falls back to none."""
     ok, reason = available(requested)
     if ok:
+        prof = profile(requested)
+        if prof is not None and prof.experimental:
+            return requested, (f"backend {requested!r} is experimental and its "
+                               f"CLI flags are unverified")
         return requested, ""
     return "none", f"{reason}; continuing without the AI layer"
 
@@ -116,22 +191,45 @@ def extract_json(text: str) -> dict | None:
 # Backends
 # --------------------------------------------------------------------------
 
+def build_command(backend_name: str, model: str | None,
+                  extra_args: list[str] | None = None) -> list[str]:
+    """The argv for one backend call, prompt included.
+
+    Separated from `_invoke` so it can be asserted on directly — the command
+    shape is the part that differs between backends, and it is worth a test.
+    """
+    prof = profile(backend_name)
+    if prof is None:
+        raise ModelError(f"backend {backend_name!r} has no implementation")
+    exe = shutil.which(prof.exe) or prof.exe
+    cmd = [exe, *prof.base_args]
+    if model and prof.model_flag:
+        cmd += [prof.model_flag, model]
+    cmd += list(extra_args or ())
+    cmd.append(PROMPT_ARG)
+    return cmd
+
+
 def _invoke(backend: str, input_text: str, *, model: str | None,
-            timeout: int, cwd: Path | None) -> str:
-    """Run one backend and return its raw stdout."""
-    if backend != "pi":
+            timeout: int, cwd: Path | None,
+            extra_args: list[str] | None = None) -> str:
+    """Run one backend and return its raw stdout.
+
+    Every backend so far reads the input JSON on stdin and takes the prompt as
+    a positional argument. A backend that differs needs a branch here; the
+    command shape itself comes from its profile.
+    """
+    prof = profile(backend)
+    if prof is None:
         raise ModelError(f"backend {backend!r} has no implementation")
 
-    exe = shutil.which("pi")
+    exe = shutil.which(prof.exe)
     if not exe:
-        raise ModelError("the pi CLI is not on PATH")
+        raise ModelError(f"the {prof.exe} CLI is not on PATH")
 
-    cmd = [exe, *PI_BASE_FLAGS]
-    if model:
-        cmd += ["--model", model]
-    cmd.append(PI_PROMPT)
+    cmd = build_command(backend, model, extra_args)
 
-    # Run somewhere neutral so project-local pi resources cannot be discovered.
+    # Run somewhere neutral so project-local resources cannot be discovered.
     workdir = cwd or Path(__file__).resolve().parent.parent
     try:
         result = subprocess.run(
@@ -139,19 +237,20 @@ def _invoke(backend: str, input_text: str, *, model: str | None,
             timeout=timeout, cwd=str(workdir), check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise ModelError(f"pi timed out after {timeout}s") from exc
+        raise ModelError(f"{prof.exe} timed out after {timeout}s") from exc
     except OSError as exc:
-        raise ModelError(f"could not run pi: {exc}") from exc
+        raise ModelError(f"could not run {prof.exe}: {exc}") from exc
 
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip().splitlines()
         tail = " | ".join(detail[-3:]) if detail else "no output"
-        raise ModelError(f"pi exited {result.returncode}: {tail}")
+        raise ModelError(f"{prof.exe} exited {result.returncode}: {tail}")
     return result.stdout
 
 def generate(backend: str, input_path: Path, output_path: Path, *,
              model: str | None = None, timeout: int = DEFAULT_TIMEOUT,
              force: bool = False, dry_run: bool = False,
+             extra_args: list[str] | None = None,
              verbose: bool = True) -> dict:
     """Ask the backend for decisions and write them to `output_path`.
 
@@ -185,7 +284,8 @@ def generate(backend: str, input_path: Path, output_path: Path, *,
               file=sys.stderr)
 
     try:
-        raw = _invoke(backend, input_text, model=model, timeout=timeout, cwd=None)
+        raw = _invoke(backend, input_text, model=model, timeout=timeout, cwd=None,
+                      extra_args=extra_args)
     except ModelError as exc:
         report["error"] = str(exc)
         if verbose:

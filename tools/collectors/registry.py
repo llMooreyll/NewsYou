@@ -10,7 +10,7 @@ Nothing else in the pipeline needs to change.
 from __future__ import annotations
 
 from . import (anywayfm, geekpark, hackernews, latepost, linuxdo, ruanyifeng,
-               sspai, telegram, weibo, zhihu)
+               rss, sspai, telegram, weibo, zhihu)
 
 # name -> (module, default limit)
 SOURCES: dict[str, tuple] = {
@@ -57,3 +57,33 @@ def default_limit(name: str) -> int:
 
 def label(name: str) -> str:
     return SOURCE_LABELS.get(name, name)
+
+
+# --------------------------------------------------------------------------
+# Config-defined generic feeds
+# --------------------------------------------------------------------------
+
+# Every [[feeds]] entry in config.toml lands here, keyed by its id. They are
+# served by the generic rss module, so adding a feed is a config edit rather
+# than a new file.
+FEED_CONFIG: dict[str, dict] = {}
+
+def configure_feeds(feeds: list[dict] | None) -> list[str]:
+    """Register the configured generic feeds. Returns their ids, in order.
+
+    Called once by the orchestrator after configuration is resolved. Repeating
+    it is harmless: entries are replaced, not appended.
+    """
+    ids: list[str] = []
+    for entry in feeds or []:
+        name = entry["id"]
+        if name in SOURCES and name not in FEED_CONFIG:
+            raise ValueError(
+                f"feed id {name!r} collides with a built-in source; pick another id")
+        SOURCES[name] = (rss, int(entry.get("limit") or 20))
+        FEED_CONFIG[name] = entry
+        ids.append(name)
+    return ids
+
+def feed_config(name: str) -> dict | None:
+    return FEED_CONFIG.get(name)

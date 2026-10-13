@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Archive one day's run as a self-contained snapshot.
 
-    python tools/archive.py                       # today, full pipeline
+    python tools/archive.py                       # today, full pipeline + AI
     python tools/archive.py --day 2026-10-13      # a specific day
-    python tools/archive.py --ai-backend pi       # with the AI layer
+    python tools/archive.py --ai-backend none     # no model call
     python tools/archive.py --force               # overwrite today's snapshot
     python tools/archive.py --skip-collect        # re-render an existing snapshot
+
+Every stage reads config/config.toml; --config forwards a different file to all
+of them so one run never mixes configurations.
 
 Layout:
 
@@ -44,8 +47,7 @@ CST = timezone(timedelta(hours=8))
 
 sys.path.insert(0, str(TOOLS))
 import ai_model  # noqa: E402
-
-ARCHIVE_DEFAULT = Path("archive")
+import config  # noqa: E402
 
 def load_json(path: Path):
     try:
@@ -154,21 +156,44 @@ def update_manifest(root: Path, entry: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--archive", type=Path, default=ARCHIVE_DEFAULT)
-    parser.add_argument("--day", default="auto",
+    parser.add_argument("--archive", type=Path, default=None)
+    parser.add_argument("--day", default=None,
                         help="telegram day: auto | today | yesterday | YYYY-MM-DD")
-    parser.add_argument("--fulltext", default="today")
+    parser.add_argument("--fulltext", default=None)
     parser.add_argument("--engine", default=None, choices=["legacy", "modern"],
-                        help="default: the collector's own default (modern)")
-    parser.add_argument("--ai-backend", default=ai_model.DEFAULT_BACKEND,
+                        help="default: config collect.engine (modern)")
+    parser.add_argument("--ai-backend", default=None,
                         choices=ai_model.BACKENDS)
-    parser.add_argument("--ai-model", default=ai_model.DEFAULT_MODEL)
-    parser.add_argument("--ai-timeout", type=int, default=900)
+    parser.add_argument("--ai-model", default=None)
+    parser.add_argument("--ai-timeout", type=int, default=None)
     parser.add_argument("--force", action="store_true",
                         help="replace today's snapshot instead of versioning it")
     parser.add_argument("--skip-collect", action="store_true",
                         help="reuse an existing snapshot's collected/ data")
+    config.add_arguments(parser)
     args = parser.parse_args()
+
+    # Resolve once here and forward --config to each stage, so the whole run
+    # agrees on one configuration even when a custom file is passed.
+    cfg = config.resolve_or_exit(args, cli={
+        "archive.root": args.archive,
+        "collect.engine": args.engine,
+        "collect.fulltext": args.fulltext,
+        "telegram.day": args.day,
+        "ai.backend": args.ai_backend,
+        "ai.model": args.ai_model,
+        "ai.timeout": args.ai_timeout,
+    })
+    if config.emit_show_config(cfg, args):
+        return 0
+
+    args.archive = Path(cfg.get("archive.root"))
+    args.day = cfg.get("telegram.day")
+    args.fulltext = cfg.get("collect.fulltext")
+    args.ai_backend = cfg.get("ai.backend")
+    args.ai_model = cfg.get("ai.model")
+    args.ai_timeout = cfg.get("ai.timeout")
+    forward_config = ["--config", str(args.config)] if args.config else []
 
     root = args.archive
     stamp = datetime.now(CST)
@@ -200,7 +225,7 @@ def main() -> int:
     aidir = workdir / "ai"
     processed = workdir / "processed"
 
-    engine = args.engine or "modern"
+    engine = args.engine or cfg.get("collect.engine") or "modern"
     python = interpreter_for(engine)
 
     try:
@@ -210,6 +235,7 @@ def main() -> int:
                    "--fulltext", args.fulltext, "--day", args.day]
             if args.engine:
                 cmd += ["--engine", args.engine]
+            cmd += forward_config
             if run(cmd) != 0:
                 return 1
 
@@ -219,12 +245,13 @@ def main() -> int:
                "--ai-backend", args.ai_backend, "--ai-timeout", str(args.ai_timeout)]
         if args.ai_model:
             cmd += ["--ai-model", args.ai_model]
+        cmd += forward_config
         if run(cmd) != 0:
             return 1
 
         if run([python, str(TOOLS / "render_digest.py"),
                 "--indir", str(processed), "--fallback", str(collected),
-                "--output", str(workdir / "digest.html")]) != 0:
+                "--output", str(workdir / "digest.html"), *forward_config]) != 0:
             return 1
 
         if staging is not None:

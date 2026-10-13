@@ -3,7 +3,8 @@
 
 Uses Telegram's public web preview at https://t.me/s/<channel>: no API key, no
 login, no bot. Works for PUBLIC channels only. Adding a channel is one string in
-CHANNELS; nothing else changes.
+DEFAULT_CHANNELS (or one line in config.toml `telegram.channels`); nothing else
+changes.
 
 First page:   latest ~20 posts
 Older pages:  ?before=<lowest message id already seen>
@@ -27,7 +28,9 @@ from .base import CST, UA, FetchError
 
 SOURCE = "telegram"
 
-CHANNELS = [
+# The built-in channel list. config.toml `telegram.channels` overrides it; this
+# stays the fallback so the collector works with no configuration at all.
+DEFAULT_CHANNELS = [
     "MaiTungNews",
     "tnews365",
     "zaihuapd",
@@ -400,7 +403,7 @@ def pick_day(day_counts_by_channel: dict[str, dict[str, int]]) -> str | None:
 
 def collect(limit: int = 400, day: str = "auto", pages: int = 4,
             channels: list[str] | None = None, **_):
-    channels = channels or CHANNELS
+    channels = channels or DEFAULT_CHANNELS
     target = resolve_day(day)
     walked: dict[str, list[dict]] = {}
     report: dict[str, dict] = {}

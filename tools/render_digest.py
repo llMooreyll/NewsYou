@@ -32,6 +32,7 @@ import mimetypes
 import os
 import re
 import struct
+import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlparse, quote
@@ -39,6 +40,9 @@ from urllib.parse import urlparse, quote
 CST = timezone(timedelta(hours=8))
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = Path(__file__).resolve().parent / "digest_assets"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config  # noqa: E402
 
 # name -> (tab label, subtitle)
 SOURCE_META = {
@@ -54,6 +58,26 @@ SOURCE_META = {
     "zhihu": ("知乎热榜", "全站榜"),
 }
 ORDER = list(SOURCE_META)
+
+
+def apply_config(cfg) -> None:
+    """Overlay configured panel order and labels onto the built-in defaults.
+
+    Subtitles stay in code — they describe what a panel contains, which is not
+    a user preference — while the tab label and the order come from config, so
+    renaming or reordering a panel needs no code change.
+    """
+    global ORDER, SOURCE_META
+    labels = dict(cfg.get("sources.labels") or {})
+    order = [name for name in (cfg.get("sources.order") or [])]
+    merged: dict[str, tuple[str, str]] = {}
+    for name in order:
+        builtin_label, builtin_sub = SOURCE_META.get(name, (None, ""))
+        merged[name] = (labels.get(name) or builtin_label or name, builtin_sub)
+    for name, (label, sub) in SOURCE_META.items():      # anything not in order
+        merged.setdefault(name, (labels.get(name) or label, sub))
+    SOURCE_META = merged
+    ORDER = list(merged)
 
 # Panel headings where the full name does not fit a tab.
 PANEL_TITLE = {"linuxdo": "linux.do 晚报", "latepost": "晚点 LatePost", "ruanyifeng": "阮一峰的网络日志"}
@@ -1128,12 +1152,25 @@ def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: b
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--indir", type=Path, default=Path("data/processed"))
-    parser.add_argument("--fallback", type=Path, default=Path("data/collected"))
-    parser.add_argument("--output", type=Path, default=Path("site/digest.html"))
+    parser.add_argument("--indir", type=Path, default=None)
+    parser.add_argument("--fallback", type=Path, default=None)
+    parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--no-embed", action="store_true",
                         help="link images instead of inlining them (smaller file, not portable)")
+    config.add_arguments(parser)
     args = parser.parse_args()
+
+    cfg = config.resolve_or_exit(args, cli={
+        "paths.processed": args.indir,
+        "paths.collected": args.fallback,
+        "output.digest": args.output,
+    })
+    if config.emit_show_config(cfg, args):
+        return 0
+    args.indir = Path(cfg.get("paths.processed"))
+    args.fallback = Path(cfg.get("paths.collected"))
+    args.output = Path(cfg.get("output.digest"))
+    apply_config(cfg)
 
     indir = args.indir if args.indir.exists() else args.fallback
     sources: dict[str, dict] = {}

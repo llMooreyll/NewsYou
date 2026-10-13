@@ -40,21 +40,34 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import config                                              # noqa: E402
 from collectors import base, registry                      # noqa: E402
 from collectors import extract as ex                        # noqa: E402
 from collectors import telegram as tg                       # noqa: E402
-from collectors.base import CST, FULLTEXT_DEFAULT, FULLTEXT_MODES  # noqa: E402
+from collectors.base import CST, FULLTEXT_MODES            # noqa: E402
 import ai_stage                                             # noqa: E402
 
 def _source_kwargs(name: str, args) -> dict:
     """Per-source arguments. Keeps site quirks out of the main loop."""
+    feed = registry.feed_config(name)
+    if feed is not None:
+        return {
+            "url": feed["url"],
+            "name": feed.get("name") or name,
+            "source": feed.get("source") or name,
+            "kind": feed.get("kind") or "article",
+            "date_source": feed.get("date_source") or "rss",
+            "fulltext": feed.get("fulltext") or args.fulltext,
+        }
     if name == "telegram":
-        return {"day": args.day, "pages": args.pages}
+        return {"day": args.day, "pages": args.pages, "channels": args.channels}
     kwargs: dict = {}
     if name in registry.FULLTEXT_SOURCES:
         kwargs["fulltext"] = args.fulltext
     if name == "linuxdo" and args.date:
         kwargs["date"] = args.date
+    if name == "hackernews" and args.hn_feed:
+        kwargs["feed"] = args.hn_feed
     return kwargs
 
 def _postprocess(name: str, items: list[dict], args, outdir: Path) -> list[dict]:
@@ -75,36 +88,94 @@ def _postprocess(name: str, items: list[dict], args, outdir: Path) -> list[dict]
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("source", nargs="?", choices=sorted(registry.SOURCES))
+    parser.add_argument("source", nargs="?",
+                        help="one source name, or use --all for every configured source")
     parser.add_argument("--all", action="store_true")
-    parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--outdir", type=Path, default=Path("data/collected"))
-    parser.add_argument("--aidir", type=Path, default=Path("data/ai"),
+    parser.add_argument("--limit", type=int, default=None,
+                        help="override the per-source limit for this run")
+    parser.add_argument("--outdir", type=Path, default=None)
+    parser.add_argument("--aidir", type=Path, default=None,
                         help="where stage 2 input files are written")
     parser.add_argument("--engine", default=None, choices=ex.ENGINES,
-                        help=f"extraction engine: modern (trafilatura/feedparser, "
-                             f"default) or legacy (standard library only)")
+                        help="extraction engine; default from config: collect.engine")
     parser.add_argument("--date", default=None, help="linuxdo issue date")
-    parser.add_argument("--day", default="auto", help="telegram day: today | yesterday | auto | YYYY-MM-DD")
-    parser.add_argument("--pages", type=int, default=4, help="telegram pages per channel")
-    parser.add_argument("--fulltext", default=FULLTEXT_DEFAULT,
-                        help=f"full-text policy: {' | '.join(FULLTEXT_MODES)} | <N>. "
-                             "Default 'today' fetches full text only for items published today")
+    parser.add_argument("--day", default=None,
+                        help="telegram day: today | yesterday | auto | YYYY-MM-DD")
+    parser.add_argument("--pages", type=int, default=None,
+                        help="telegram pages per channel")
+    parser.add_argument("--fulltext", default=None,
+                        help=f"full-text policy: {' | '.join(FULLTEXT_MODES)} | <N>")
     parser.add_argument("--no-ai-input", action="store_true",
                         help="skip writing the stage 2 input files")
     parser.add_argument("--no-images", action="store_true",
-                        help="do not download telegram post images (images are on by default)")
-    parser.add_argument("--images-per-post", type=int, default=2)
-    parser.add_argument("--image-cap", type=int, default=200)
+                        help="do not download telegram post images")
+    parser.add_argument("--images-per-post", type=int, default=None)
+    parser.add_argument("--image-cap", type=int, default=None)
     parser.add_argument("--dates", action="store_true")
     parser.add_argument("--list-sources", action="store_true")
     parser.add_argument("--list", action="store_true")
+    config.add_arguments(parser)
     args = parser.parse_args()
+
+    # ---- configuration: CLI > env > config.toml > built-in default ----
+    cfg = config.resolve_or_exit(args, cli={
+        "collect.engine": args.engine,
+        "collect.fulltext": args.fulltext,
+        "collect.limit": args.limit,
+        "collect.images_per_post": args.images_per_post,
+        "collect.image_cap": args.image_cap,
+        "telegram.day": args.day,
+        "telegram.pages": args.pages,
+        "paths.collected": args.outdir,
+        "paths.ai": args.aidir,
+    })
+    if config.emit_show_config(cfg, args):
+        return 0
+
+    # Config-defined generic feeds join the registry before anything looks a
+    # source up, so a feed id is as valid as a built-in name from here on.
+    registry.configure_feeds(cfg.get("feeds"))
+
+    args.fulltext = cfg.get("collect.fulltext")
+    args.day = cfg.get("telegram.day")
+    args.pages = cfg.get("telegram.pages")
+    args.images_per_post = cfg.get("collect.images_per_post")
+    args.image_cap = cfg.get("collect.image_cap")
+    args.outdir = Path(cfg.get("paths.collected"))
+    args.aidir = Path(cfg.get("paths.ai"))
+    args.channels = list(cfg.get("telegram.channels") or [])
+    args.hn_feed = cfg.get("hackernews.feed")
+    args.limits = dict(cfg.get("sources.limits") or {})
+    args.labels = dict(cfg.get("sources.labels") or {})
+    if not cfg.get("collect.images", True):
+        args.no_images = True
+    # collect.limit = 0 means "no global override"; the per-source limit applies.
+    if args.limit is None:
+        args.limit = cfg.get("collect.limit") or None
+
+    # Panel order, and the active set: a source missing from `order` never runs.
+    order = [name for name in (cfg.get("sources.order") or []) if name in registry.SOURCES]
+    for name in registry.SOURCES:
+        if name not in order:
+            order.append(name)
+    if cfg.get("sources.enabled"):
+        wanted = set(cfg.get("sources.enabled"))
+        unknown = wanted - set(registry.SOURCES)
+        if unknown:
+            print(f"config error: sources.enabled names unknown source(s): "
+                  f"{', '.join(sorted(unknown))}", file=sys.stderr)
+            return 2
+        order = [name for name in order if name in wanted]
+    args.order = order
+
+    if args.source and args.source not in registry.SOURCES:
+        parser.error(f"unknown source {args.source!r}; "
+                     f"known: {', '.join(sorted(registry.SOURCES))}")
 
     # An explicitly requested engine is honoured or fails; the default may fall
     # back, so a bare checkout still runs. resolve_engine only falls back when
     # the request came from the default, which is why None is meaningful here.
-    requested = args.engine if args.engine is not None else ex.DEFAULT_ENGINE
+    requested = args.engine if args.engine is not None else cfg.get("collect.engine")
     engine, warning = ex.resolve_engine(requested, allow_fallback=args.engine is None)
     if warning:
         print(f"warning: {warning}", file=sys.stderr)
@@ -113,10 +184,12 @@ def main() -> int:
     args.engine = engine
 
     if args.list_sources:
-        for name in registry.ORDER:
+        for name in order:
             module = registry.get(name)
             doc = (module.__doc__ or "").strip().splitlines()[0]
-            print(f"{name:<12} limit={registry.default_limit(name):<4} {doc}")
+            origin = "feed" if registry.feed_config(name) else "built-in"
+            print(f"{name:<12} limit={registry.default_limit(name):<4} "
+                  f"{origin:<8} {doc}")
         return 0
 
     if args.dates:
@@ -128,7 +201,7 @@ def main() -> int:
         parser.error("choose a source, or pass --all")
 
     today = datetime.now(CST).date()
-    targets = registry.ORDER if args.all else [args.source]
+    targets = order if args.all else [args.source]
     results: dict[str, list[dict]] = {}
     statuses: dict[str, dict] = {}
     failures: dict[str, str] = {}
@@ -138,8 +211,14 @@ def main() -> int:
         started = time.time()
         try:
             module = registry.get(name)
-            limit = args.limit if args.limit is not None else registry.default_limit(name)
+            limit = args.limit if args.limit is not None \
+                else args.limits.get(name, registry.default_limit(name))
             items = module.collect(limit, engine=args.engine, **_source_kwargs(name, args))
+            # The configured label wins over the collector's own display name,
+            # so renaming a panel needs no code change.
+            if args.labels.get(name):
+                for entry in items:
+                    entry["source_name"] = args.labels[name]
             for entry in items:
                 base.stamp_now(entry)
             base.mark_today(items, today)

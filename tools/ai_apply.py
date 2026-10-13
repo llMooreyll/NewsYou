@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ai_model  # noqa: E402
 import ai_stage  # noqa: E402
+import config  # noqa: E402
 from ai_stage import ORDER  # noqa: E402
 
 SKIP_FILES = {"index.json", "telegram_duplicate_groups.json"}
@@ -69,26 +70,47 @@ def write_json(path: Path, payload) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--collected", type=Path, default=Path("data/collected"))
-    parser.add_argument("--ai", type=Path, default=Path("data/ai"))
-    parser.add_argument("--out", type=Path, default=Path("data/processed"))
+    parser.add_argument("--collected", type=Path, default=None)
+    parser.add_argument("--ai", type=Path, default=None)
+    parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true", help="validate but write nothing")
     parser.add_argument("--report", action="store_true", help="print the applied changes")
-    parser.add_argument("--ai-backend", default=ai_model.DEFAULT_BACKEND,
+    parser.add_argument("--ai-backend", default=None,
                         choices=ai_model.BACKENDS,
-                        help=f"model backend: pi (default, local pi CLI in print "
-                             f"mode) or none (no model call). "
-                             f"Default model: {ai_model.DEFAULT_MODEL}")
-    parser.add_argument("--ai-model", default=ai_model.DEFAULT_MODEL,
-                        help="model to pass to the backend; pass '' to let the "
-                             "backend pick its own default")
-    parser.add_argument("--ai-timeout", type=int, default=ai_model.DEFAULT_TIMEOUT,
+                        help="model backend. Default from config: ai.backend")
+    parser.add_argument("--ai-model", default=None,
+                        help="model passed to the backend. Default from config: "
+                             "ai.model. Pass '' to let the backend choose")
+    parser.add_argument("--ai-timeout", type=int, default=None,
                         help="seconds before a backend call is abandoned")
     parser.add_argument("--ai-force", action="store_true",
                         help="regenerate decisions even if the file already exists")
+    config.add_arguments(parser)
     args = parser.parse_args()
 
-    ai_backend, ai_warning = ai_model.resolve_backend(args.ai_backend)
+    # CLI > env > config.toml > built-in default, for every value below.
+    cfg = config.resolve_or_exit(args, cli={
+        "paths.collected": args.collected,
+        "paths.ai": args.ai,
+        "paths.processed": args.out,
+        "ai.backend": args.ai_backend,
+        "ai.model": args.ai_model,
+        "ai.timeout": args.ai_timeout,
+        "ai.reuse": False if args.ai_force else None,
+    })
+    if config.emit_show_config(cfg, args):
+        return 0
+
+    args.collected = Path(cfg.get("paths.collected"))
+    args.ai = Path(cfg.get("paths.ai"))
+    args.out = Path(cfg.get("paths.processed"))
+    args.ai_timeout = cfg.get("ai.timeout")
+    args.ai_model = cfg.get("ai.model") or None
+    ai_extra_args = list(cfg.get("ai.args") or [])
+    # reuse=false in the config is the same intent as --ai-force on the CLI.
+    ai_force = args.ai_force or not cfg.get("ai.reuse", True)
+
+    ai_backend, ai_warning = ai_model.resolve_backend(cfg.get("ai.backend"))
     if ai_warning:
         print(f"warning: {ai_warning}", file=sys.stderr)
 
@@ -111,7 +133,8 @@ def main() -> int:
         report["ai_telegram"] = ai_model.generate(
             ai_backend, args.ai / "telegram_input.json",
             args.ai / "telegram_decisions.json", model=args.ai_model,
-            timeout=args.ai_timeout, force=args.ai_force, dry_run=args.dry_run)
+            timeout=args.ai_timeout, force=ai_force, dry_run=args.dry_run,
+            extra_args=ai_extra_args)
 
     tg_decisions_path = args.ai / "telegram_decisions.json"
     tg_decisions = load_json(tg_decisions_path)
@@ -174,7 +197,8 @@ def main() -> int:
         report["ai_digest"] = ai_model.generate(
             ai_backend, args.ai / "digest_input.json",
             args.ai / "digest_decisions.json", model=args.ai_model,
-            timeout=args.ai_timeout, force=args.ai_force, dry_run=args.dry_run)
+            timeout=args.ai_timeout, force=ai_force, dry_run=args.dry_run,
+            extra_args=ai_extra_args)
 
     digest_decisions_path = args.ai / "digest_decisions.json"
     digest_decisions = load_json(digest_decisions_path)
