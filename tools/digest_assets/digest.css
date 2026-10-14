@@ -353,6 +353,15 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
   color:var(--fg-2);background:var(--s3)}
 .lbl-t.hot{color:var(--on-accent);background:var(--hot)}
 .lbl-t.new{color:var(--accent);background:var(--accent-dim)}
+/* V2EX: rank · title + node · bar · replies · last reply */
+.b-vx{max-width:1040px}
+.b-vx .br,.b-vx .bd-legend{grid-template-columns:24px minmax(0,1fr) 56px 40px 52px}
+/* Reddit: rank · title + domain · subreddit · time. No bar and no number
+   column: the feeds carry no score, so there is nothing to scale. */
+.b-rd{max-width:1040px}
+.b-rd .br,.b-rd .bd-legend{grid-template-columns:24px minmax(0,1fr) 96px 44px}
+.br-sub{font-family:var(--mono);font-size:10.5px;color:var(--fg-3);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 知乎: rank · title + one-line excerpt · bar · heat */
 .b-zh{max-width:1040px}
 .b-zh .br,.b-zh .bd-legend{grid-template-columns:24px minmax(0,1fr) 72px 64px}
@@ -732,6 +741,10 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
   .b-wb .br,.b-wb .bd-legend{grid-template-columns:22px minmax(0,1fr) 20px 56px}
   .b-wb .br-bar,.b-wb .bd-legend .h-bar{display:none}
   .b-zh .br,.b-zh .bd-legend{grid-template-columns:22px minmax(0,1fr) 56px}
+  .b-vx .br,.b-vx .bd-legend{grid-template-columns:22px minmax(0,1fr) 40px}
+  .b-vx .br-bar,.b-vx .br-tm,.b-vx .bd-legend .h-bar,.b-vx .bd-legend .h-tm{display:none}
+  .b-rd .br,.b-rd .bd-legend{grid-template-columns:22px minmax(0,1fr) 44px}
+  .b-rd .br-tm,.b-rd .bd-legend .h-tm{display:none}
   .b-zh .br-bar,.b-zh .bd-legend .h-bar{display:none}
   .dg-kw{gap:6px 14px}
   .ov{padding:12px}

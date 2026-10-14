@@ -56,6 +56,8 @@ SOURCE_META = {
     "ruanyifeng": ("阮一峰", "科技爱好者周刊"),
     "anywayfm": ("Anyway.Now", "设计与工具链接"),
     "hackernews": ("Hacker News", "Top stories"),
+    "v2ex": ("V2EX", "热帖榜 · 按回复数"),
+    "reddit": ("Reddit", "订阅板块热帖"),
     "weibo": ("微博热搜", "实时榜"),
     "zhihu": ("知乎热榜", "全站榜"),
 }
@@ -1073,8 +1075,61 @@ def render_zhihu_board(items: list[dict]) -> str:
     return f'<div class="b-zh">{legend}<ol class="board">{"".join(rows)}</ol></div>'
 
 
+def render_v2ex_board(items: list[dict]) -> str:
+    """V2EX's hot board: reply count is the ranking, so it drives the bar.
+
+    The node (板块) is shown because it is half of what the row means on V2EX —
+    "147 回复" in 问与答 is a different thing from 147 in 程序员.
+    """
+    vals = [int((e.get("extra") or {}).get("replies") or 0) for e in items]
+    top = max(vals or [0])
+    rows = []
+    for i, (e, v) in enumerate(zip(items, vals), 1):
+        x = e.get("extra") or {}
+        node = (x.get("node_title") or "").strip()
+        date, tm = stamp(e)
+        rows.append(
+            f'<li class="br rv{" top" if i <= 3 else ""}" id="{item_anchor(e)}" style="--i:{i}">'
+            f'<span class="br-rk">{i}</span>'
+            f'<span class="br-t">{ext(e.get("url"), esc(e.get("title")))}'
+            + (f'<a class="br-dom" href="https://www.v2ex.com/go/{esc(x.get("node_name"))}" '
+               f'target="_blank" rel="noopener noreferrer">{esc(node)}</a>' if node else "")
+            + f'</span>{_bar(v, top)}'
+            f'<span class="br-v">{v}</span>'
+            f'<span class="br-tm">{esc(tm or date)}</span></li>')
+    legend = ('<div class="bd-legend"><span></span><span>话题</span><span class="h-bar"></span>'
+              '<span style="text-align:right">回复</span>'
+              '<span class="h-tm" style="text-align:right">最后回复</span></div>')
+    return f'<div class="b-vx">{legend}<ol class="board">{"".join(rows)}</ol></div>'
+
+def render_reddit_board(items: list[dict]) -> str:
+    """Reddit's feeds: no score or comment count exists, so nothing is ranked.
+
+    The order is Reddit's own `hot`, which is why the rank column is just the
+    feed position. A row shows where the post points (its domain, or what kind
+    of media it is) and which subreddit it came from.
+    """
+    KIND_LABEL = {"video": "视频", "image": "图片", "gallery": "图集", "self": "自帖"}
+    rows = []
+    for i, e in enumerate(items, 1):
+        x = e.get("extra") or {}
+        domain = (x.get("domain") or "").strip()
+        kind = KIND_LABEL.get((x.get("media_kind") or "").strip(), "")
+        date, tm = stamp(e)
+        rows.append(
+            f'<li class="br rv{" top" if i <= 3 else ""}" id="{item_anchor(e)}" style="--i:{i}">'
+            f'<span class="br-rk">{i}</span>'
+            f'<span class="br-t">{ext(e.get("url"), esc(e.get("title")))}'
+            + (f'<span class="br-dom">{esc(domain)}</span>' if domain
+               else (f'<span class="br-dom">{esc(kind)}</span>' if kind else ""))
+            + f'</span>'
+            f'<span class="br-sub">r/{esc(x.get("subreddit"))}</span>'
+            f'<span class="br-tm">{esc(tm or date)}</span></li>')
+    legend = ('<div class="bd-legend"><span></span><span>帖子</span><span></span>'
+              '<span>板块</span><span class="h-tm" style="text-align:right">发布</span></div>')
+    return f'<div class="b-rd">{legend}<ol class="board">{"".join(rows)}</ol></div>'
+
 # --------------------------------------------------------------------------
-# article lists
 # --------------------------------------------------------------------------
 
 def article_rows(items: list[dict], *, start: int = 0) -> str:
@@ -1407,6 +1462,10 @@ def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: b
                 status = {k: v for k, v in status.items() if k != "latest_published_at"}
         elif name == "zhihu":
             body = render_zhihu_board(items)
+        elif name == "v2ex":
+            body = render_v2ex_board(items)
+        elif name == "reddit":
+            body = render_reddit_board(items)
         else:
             body = render_article_panel(items)
 

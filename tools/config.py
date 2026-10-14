@@ -72,7 +72,7 @@ def defaults() -> dict:
     module, and a module-level import would create a cycle once a collector
     wants to read configuration.
     """
-    from collectors import registry, telegram
+    from collectors import reddit, registry, telegram
 
     return {
         "ai": {
@@ -102,6 +102,17 @@ def defaults() -> dict:
         },
         "hackernews": {
             "feed": "topstories",
+        },
+        "v2ex": {
+            "sort": "hot",
+        },
+        "reddit": {
+            "subreddits": list(reddit.DEFAULT_SUBREDDITS),
+            "sort": "hot",
+            # Seconds between subreddit fetches. Reddit throttles at roughly one
+            # request per minute per address; 15s still produced 429s when
+            # measured, 60s was reliable.
+            "delay": int(reddit.DEFAULT_DELAY),
         },
         "sources": {
             "order": list(registry.ORDER),

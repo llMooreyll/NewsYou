@@ -71,6 +71,15 @@ def _source_kwargs(name: str, args) -> dict:
         kwargs["date"] = args.date
     if name == "hackernews" and args.hn_feed:
         kwargs["feed"] = args.hn_feed
+    if name == "v2ex" and args.v2ex_sort:
+        kwargs["sort"] = args.v2ex_sort
+    if name == "reddit":
+        if args.reddit_subs:
+            kwargs["subreddits"] = args.reddit_subs
+        if args.reddit_sort:
+            kwargs["sort"] = args.reddit_sort
+        if args.reddit_delay is not None:
+            kwargs["delay"] = args.reddit_delay
     return kwargs
 
 def _nature_maps(cfg) -> tuple[dict, dict]:
@@ -205,6 +214,10 @@ def main() -> int:
     args.channels = list(cfg.get("telegram.channels") or [])
     args.source_nature, args.unit_nature = _nature_maps(cfg)
     args.hn_feed = cfg.get("hackernews.feed")
+    args.v2ex_sort = cfg.get("v2ex.sort")
+    args.reddit_subs = list(cfg.get("reddit.subreddits") or [])
+    args.reddit_sort = cfg.get("reddit.sort")
+    args.reddit_delay = cfg.get("reddit.delay")
     args.limits = dict(cfg.get("sources.limits") or {})
     args.labels = dict(cfg.get("sources.labels") or {})
     if not cfg.get("collect.images", True):

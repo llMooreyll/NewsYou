@@ -76,12 +76,31 @@ day = "auto"
 # topstories | beststories | newstories | askstories | showstories
 feed = "topstories"
 
+[v2ex]
+# The hot board, already sorted by reply count. `?tab=hot` is the only tab
+# V2EX sorts; all/recent are in posting order and useless for a hottest list.
+sort = "hot"
+
+[reddit]
+# Read through the public Atom feeds, which need no login. Each feed returns 25
+# posts with a title, a permalink and an author — no score and no comment count.
+# Reddit's own `hot` ordering is the ranking, so that is not a loss.
+#
+# The rate limit is about one request per minute per address and is not lifted
+# by changing the user agent, so these are fetched strictly serially with
+# `delay` between them: three subreddits cost about two minutes of waiting.
+# Lowering it below ~60s starts returning 429 with an empty body.
+subreddits = ["hardware", "technology", "godot"]
+sort = "hot"
+delay = 60
+
 [sources]
 # Panel order. Purely ordering: every registered source still runs, and any not
 # named here is appended in its built-in position. To actually turn a source
 # off, list the ones you want in `enabled` below.
 order = ["sspai", "telegram", "linuxdo", "latepost", "geekpark", "solidot",
-         "ruanyifeng", "anywayfm", "hackernews", "weibo", "zhihu"]
+         "ruanyifeng", "anywayfm", "hackernews", "v2ex", "reddit", "weibo",
+         "zhihu"]
 # Optional whitelist: when non-empty, only these sources are collected.
 # Empty means "everything in order".
 enabled = []
@@ -100,6 +119,10 @@ geekpark = 15
 ruanyifeng = 10
 anywayfm = 10
 hackernews = 15
+v2ex = 40
+# Three subreddits x 25 posts per feed. The feeds are fetched one per minute
+# (see below), so this number only decides how many are kept.
+reddit = 75
 weibo = 15
 zhihu = 15
 
@@ -113,7 +136,7 @@ zhihu = 15
 # naming one source means naming all of them. Leaving a source out silently
 # puts it back in the news side.
 [sources.nature]
-discussion = ["linuxdo", "hackernews"]
+discussion = ["linuxdo", "hackernews", "v2ex", "reddit"]
 longform = ["sspai", "latepost", "geekpark", "ruanyifeng", "anywayfm"]
 
 # Per-unit overrides for the sources that carry more than one nature.
@@ -147,6 +170,8 @@ solidot = "奇客 Solidot"
 ruanyifeng = "阮一峰的网络日志"
 anywayfm = "Anyway.Now 安妮薇看看"
 hackernews = "Hacker News"
+v2ex = "V2EX"
+reddit = "Reddit"
 weibo = "微博热搜"
 zhihu = "知乎热榜"
 

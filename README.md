@@ -2,7 +2,7 @@
 
 个人 Newsletter 聚合系统：把中英文多信源的一天内容抓下来，可选地交给模型去重、筛选，最后渲染成**一个自包含的 HTML 文件**。
 
-- **10 个信源**：少数派（派早报逐条拆开）、Telegram（18 个频道）、linux.do、晚点、极客公园、奇客 Solidot、阮一峰、Anyway.Now、Hacker News、知乎热榜
+- **12 个信源**：少数派（派早报逐条拆开）、Telegram（18 个频道）、linux.do、晚点、极客公园、奇客 Solidot、阮一峰、Anyway.Now、Hacker News、V2EX、Reddit、知乎热榜
 
 > 微博热搜默认关闭（`sources.disabled = ["weibo"]`）：榜单噪声大、内容很少留到第二天。**采集器与榜单渲染器都保留**，删掉配置里那个名字即可恢复。
 - **单文件产出**：Telegram 图片内联 base64，短讯可离线阅读；展开长文时正文配图按原 URL 加载
@@ -188,11 +188,36 @@ codex  codex exec --skip-git-repo-check --sandbox read-only --model <m> "<prompt
 |---|---|---|
 | `feed` | `"topstories"` | `topstories` \| `beststories` \| `newstories` \| `askstories` \| `showstories` |
 
+### `[v2ex]` — 热帖榜
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `sort` | `"hot"` | `hot` 是唯一按回复数排序的 tab；`all` / `recent` 是发帖顺序，做热榜没有意义 |
+
+一次请求拿整榜（39 条），服务端已按回复数降序，每条带分区、作者、回复数、最后回复时间。**不做逐帖请求** —— 站方自己的排序就是它的价值。
+
+### `[reddit]` — 订阅板块
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `subreddits` | `["hardware", "technology", "godot"]` | 订阅的板块，每个约 25 条 |
+| `sort` | `"hot"` | `hot` / `top` / `new` / `rising` |
+| `delay` | `60` | 两次请求之间的秒数 |
+
+走**公开 Atom feed**，无需登录。代价说清楚：
+
+| 拿得到 | 拿不到 |
+|---|---|
+| 标题、永久链接、作者、发布时间 | 分数（score）、评论数、帖子正文 |
+| 帖子指向的域名或媒体类型 | —— |
+
+Reddit 自己的 `hot` 排序就是热度，所以缺 score 不影响排序。**速率限制约 1 请求/分钟**（换 UA 无效，实测 15s 间隔仍 429、60s 稳定），所以这些请求严格串行：3 个板块约需 2 分钟等待。
+
 ### `[sources]` — 信源集合
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `order` | 11 个源 | **面板顺序**。纯粹是排序：没列到的源仍会运行，只是排在后面 |
+| `order` | 12 个源 | **面板顺序**。纯粹是排序：没列到的源仍会运行，只是排在后面 |
 | `enabled` | `[]` | **白名单**。非空时只抓这些源。空 = 全部 |
 | `disabled` | `["weibo"]` | **按名关闭**。与 `enabled` 分开，关一个源不必列出其余全部 |
 | `[sources.limits]` | 各源不同 | 每个源抓多少条 |
@@ -206,7 +231,7 @@ codex  codex exec --skip-git-repo-check --sandbox read-only --model <m> "<prompt
 
 ```toml
 [sources.nature]
-discussion = ["linuxdo", "hackernews"]      # 分享/讨论 → 2d
+discussion = ["linuxdo", "hackernews", "v2ex", "reddit"]   # 分享/讨论 → 2d
 longform   = ["sspai", "latepost", "geekpark", "ruanyifeng", "anywayfm"]
 ```
 
@@ -330,7 +355,7 @@ make archive DAY=2026-10-12  # 指定快照名
                     │  阶段 1 · 采集                            │
                     │  tools/collect.py + collectors/          │
                     │                                          │
-  11 个信源  ──────▶ │  HTTP 抓取 → 归一化 → 时间戳 → 去重        │
+  12 个信源  ──────▶ │  HTTP 抓取 → 归一化 → 时间戳 → 去重        │
                     │                                          │
                     └──────────────┬───────────────────────────┘
                                    │  data/collected/*.json   （原始，永不改写）
@@ -377,7 +402,7 @@ tools/collectors/
   ├── feed.py                 RSS 源的共用骨架
   ├── registry.py             唯一的注册表
   ├── rss.py                  通用 RSS 源（配置驱动）
-  └── <10 个源>.py            每源一个文件
+  └── <11 个源>.py            每源一个文件
 ```
 
 ### `base.py` — 共享底座
@@ -430,18 +455,20 @@ tools/collectors/
 
 `make ab` 会用两个引擎各跑一遍，`tools/compare_engines.py` 生成差异报告——它能区分**真差异**和两类噪声（抓取时刻不同、实时榜单漂移）。
 
-### 11 个信源各自怎么抓
+### 12 个信源各自怎么抓
 
 | 源 | 方式 | 关键点 |
 |---|---|---|
-| **少数派** | RSS + v1 API 兜底 | 只在 feed 条数不足时调 API；全文只抓「派早报」 |
+| **少数派** | v1 API 为主，RSS 兜底 | 一次请求拿到列表/摘要/作者/标签/`post_type`；**派早报按小节拆成逐条新闻** |
 | **Telegram** | `t.me/s/<channel>` 公开预览 | **唯一真正的通用适配器**：18 个频道共用一套解析，无 API key、无登录 |
 | **linux.do** | 晚报页分节 | 一个页面多个 `<section>`，每节独立成块 |
-| **晚点** | POST `/site/index` | 需 `X-Requested-With`；**证书链不完整**，走 `RELAXED_TLS` |
+| **晚点** | POST `/site/index` | 需 `X-Requested-With`；站点**中间证书链不完整**，故额外信任一张 Let's Encrypt 根证书（`extra_trust`），**证书校验保持开启** |
 | **极客公园** | RSS | 正文用通用抽取；链接 `http→https` 修正 |
 | **阮一峰** | Atom + 归档页兜底 | 归档条目只有月份 → 日期是近似的 |
 | **Anyway.Now** | `/now/` 页面 | 是**外链推荐列表**不是文章，故**不抓正文**（`/links/<id>` 是 301 跳转器） |
-| **Hacker News** | Firebase API | 先取 id 列表，再逐条请求 |
+| **Hacker News** | Firebase API | 先取 id 列表，再逐条请求（这些请求并行） |
+| **V2EX** | `/?tab=hot` 页面 | 一次请求拿整榜，**服务端已按回复数降序**；只有 `hot` 这个 tab 排序 |
+| **Reddit** | `r/<sub>/hot/.rss` | 公开 Atom feed，**无需登录**；只有标题/链接/作者，速率限制约 1 请求/分钟故串行 |
 | **微博热搜** | `ajax/side/hotSearch` | 需 `Referer: https://weibo.com/`；榜单无发布时间 |
 | **知乎热榜** | `api.zhihu.com/topstory/hot-list` | 网页版 403，走 API；URL 从 API 形式改写为公开形式 |
 
@@ -543,7 +570,7 @@ API 列表(20 篇) → 取最新一期派早报 → 抓正文 → 按小节拆�
 
 **2b · 全天汇总**（`prompts/digest_summary.md`）
 
-输入是**全部 11 个源**的条目（含长文），输出一段覆盖全天面貌的汇总 + 带权重的关键字。
+输入是**全部 12 个源**的条目（含长文），输出一段覆盖全天面貌的汇总 + 带权重的关键字。
 
 - **不删除任何条目**，只在顶部叠加一个「今日汇总」面板
 - 汇总覆盖**全天面貌**，不逐条罗列，**按主题分成 2–4 段**（每段一个线程），而不是一大块文字
@@ -612,7 +639,7 @@ BACKEND_TABLE = {
 ```
 今日汇总    ← 汇总（全天面貌 + 带权关键字）+ 新闻 + 讨论（任一有内容即出现）
 少数派 / Telegram / linux.do / 晚点 / 极客公园 / 奇客 Solidot /
-阮一峰 / Anyway.Now / Hacker News / 知乎热榜
+阮一峰 / Anyway.Now / Hacker News / V2EX / Reddit / 知乎热榜
 ```
 
 顺序与名称来自 `config.toml` 的 `sources.order` / `sources.labels`。
@@ -748,8 +775,9 @@ make test      # 离线测试，不联网、不调模型
 **已知限制**：
 
 - Telegram 只能抓**公开**频道（走 `t.me/s/` 预览页）
+- Reddit 走公开 RSS，拿不到分数与评论数，且速率限制约 1 请求/分钟（故串行，3 个板块约 2 分钟）
 - 微博/知乎热搜是**实时榜**，两次运行结果会漂移，不是可复现性问题
-- 晚点的 TLS 证书链不完整，需特殊处理
+- 晚点的中间证书链不完整，需额外信任一张 Let's Encrypt 根证书（不是关闭校验）
 - `--day today` 在凌晨返回 0 条，用 `auto`
 
 ---
@@ -769,7 +797,7 @@ tools/
   render_digest.py        阶段 3 渲染器
   archive.py              每日归档
   config.py               配置层
-  collectors/             采集层（base/extract/feed/registry/rss + 10 个源）
+  collectors/             采集层（base/extract/feed/registry/rss + 12 个源）
   demo_decisions.py       无模型演示（启发式假决策）
   compare_engines.py      引擎差异报告
   run_ab.py               一键跑两引擎对比

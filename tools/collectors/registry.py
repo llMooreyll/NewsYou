@@ -9,8 +9,8 @@ Nothing else in the pipeline needs to change.
 """
 from __future__ import annotations
 
-from . import (anywayfm, geekpark, hackernews, latepost, linuxdo, ruanyifeng,
-               rss, sspai, telegram, weibo, zhihu)
+from . import (anywayfm, geekpark, hackernews, latepost, linuxdo, reddit,
+               ruanyifeng, rss, sspai, telegram, v2ex, weibo, zhihu)
 
 # name -> (module, default limit)
 SOURCES: dict[str, tuple] = {
@@ -21,6 +21,8 @@ SOURCES: dict[str, tuple] = {
     "latepost": (latepost, 15),
     "geekpark": (geekpark, 15),
     "hackernews": (hackernews, 15),
+    "v2ex": (v2ex, 40),
+    "reddit": (reddit, 75),
     "weibo": (weibo, 15),
     "zhihu": (zhihu, 15),
     "telegram": (telegram, 400),
@@ -34,7 +36,7 @@ SOURCES: dict[str, tuple] = {
 # sources.order, and a name missing from it would land at the end of the tab
 # row. A name here that is not registered is simply skipped.
 ORDER = ["sspai", "telegram", "linuxdo", "latepost", "geekpark", "solidot",
-         "ruanyifeng", "anywayfm", "hackernews", "weibo", "zhihu"]
+         "ruanyifeng", "anywayfm", "hackernews", "v2ex", "reddit", "weibo", "zhihu"]
 
 SOURCE_LABELS = {
     "sspai": "少数派",
@@ -46,6 +48,8 @@ SOURCE_LABELS = {
     "ruanyifeng": "阮一峰的网络日志",
     "anywayfm": "Anyway.Now 安妮薇看看",
     "hackernews": "Hacker News",
+    "v2ex": "V2EX",
+    "reddit": "Reddit",
     "weibo": "微博热搜",
     "zhihu": "知乎热榜",
 }
@@ -72,6 +76,10 @@ NATURE_VALUES = ("news", "discussion", "longform")
 SOURCE_NATURE = {
     "linuxdo": "discussion",
     "hackernews": "discussion",
+    # Both are forums: a thread is a discussion, even when it links to an
+    # article, and neither is a day's news wire.
+    "v2ex": "discussion",
+    "reddit": "discussion",
     "sspai": "longform",
     "latepost": "longform",
     "geekpark": "longform",
@@ -139,6 +147,8 @@ DEFAULT_DISABLED = ["weibo"]
 # Sources whose `collect` accepts a fulltext policy.
 # anywayfm is absent on purpose: /now/ is a list of recommended links and its
 # "full text" would be a third-party article reached via a 301 redirect.
+# v2ex and reddit are absent too: neither offers a body worth fetching (V2EX
+# hot rows are titles, Reddit feeds carry no selftext).
 FULLTEXT_SOURCES = {"ruanyifeng", "sspai", "latepost", "geekpark"}
 
 def get(name: str):
