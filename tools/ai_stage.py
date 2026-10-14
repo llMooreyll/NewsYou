@@ -74,8 +74,10 @@ CLASSIFY_SUMMARY_LIMIT = 400
 # to the classifier, which defeats the point of sending it whole.
 DIGEST_ITEM_SUMMARY_LIMIT = 1600
 
-# Stage 2b: one summary of the whole day plus weighted keywords.
-DIGEST_SUMMARY_LIMIT = 800
+# Stage 2b: a short summary of the whole day plus weighted keywords.
+DIGEST_SUMMARY_LIMIT = 900          # across all paragraphs
+DIGEST_PARAGRAPH_LIMIT = 6
+DIGEST_PARAGRAPH_KEYWORDS = 5       # per paragraph
 KEYWORD_LIMIT = 20
 KEYWORD_TEXT_LIMIT = 24
 
@@ -274,7 +276,10 @@ def build_digest_input(results: dict[str, list[dict]], statuses: dict[str, dict]
             "schema": DIGEST_SCHEMA,
             "day": day,
             "model": "string",
-            "summary": "string: 一段覆盖当天整体面貌的长句，可多句，不逐条罗列",
+            "summary": [{
+                "text": "string: 一段话，2-4 句，一个主题",
+                "keywords": ["string: 这段话里的关键名词，会在正文中标记"],
+            }],
             "keywords": [{
                 "text": "string: 关键字或短语",
                 "weight": "number 0-100: 该词对理解今天的重要程度，决定显示字号",
@@ -499,6 +504,56 @@ def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[l
     return accepted, problems
 
 
+def _clean_paragraphs(value) -> tuple[list[dict], list[str]]:
+    """Normalise `summary` into [{text, keywords}] paragraphs.
+
+    A plain string is accepted as one paragraph with no keywords, so a
+    hand-written or older decisions file still renders. Each paragraph carries
+    the keywords that belong to it, which is what lets the page mark them in
+    place instead of leaving a word cloud floating beside the prose.
+    """
+    problems: list[str] = []
+    if value is None:
+        return [], problems
+    if isinstance(value, str):
+        value = [{"text": value}]
+    if not isinstance(value, list):
+        return [], [f"summary: expected a string or a list, got {type(value).__name__}"]
+
+    out: list[dict] = []
+    total = 0
+    for index, item in enumerate(value):
+        if isinstance(item, str):
+            text, words = item, []
+        elif isinstance(item, dict):
+            text, words = item.get("text"), item.get("keywords") or []
+        else:
+            problems.append(f"summary {index}: not an object or string")
+            continue
+        text = _clean_text(text, DIGEST_SUMMARY_LIMIT + 1)
+        if not text:
+            problems.append(f"summary {index}: empty paragraph, skipped")
+            continue
+        if total + len(text) > DIGEST_SUMMARY_LIMIT:
+            problems.append(f"summary trimmed to {DIGEST_SUMMARY_LIMIT} characters")
+            text = text[:max(0, DIGEST_SUMMARY_LIMIT - total)]
+            if not text:
+                break
+        total += len(text)
+        marks: list[str] = []
+        for word in words if isinstance(words, (list, tuple)) else []:
+            if isinstance(word, dict):
+                word = word.get("text")
+            word = _clean_text(word, KEYWORD_TEXT_LIMIT)
+            if word and word not in marks:
+                marks.append(word)
+        out.append({"text": text, "keywords": marks[:DIGEST_PARAGRAPH_KEYWORDS]})
+        if len(out) >= DIGEST_PARAGRAPH_LIMIT:
+            if index + 1 < len(value):
+                problems.append(f"summary trimmed to {DIGEST_PARAGRAPH_LIMIT} paragraphs")
+            break
+    return out, problems
+
 def validate_digest_decisions(decisions: dict, known_ids: set[str],
                               aliases: dict[str, str] | None = None) -> tuple[dict, list[str]]:
     """Return (accepted digest, problems).
@@ -523,11 +578,8 @@ def validate_digest_decisions(decisions: dict, known_ids: set[str],
     if decisions.get("schema") not in (None, DIGEST_SCHEMA):
         problems.append(f"unexpected schema {decisions.get('schema')!r}")
 
-    summary = _clean_text(decisions.get("summary"), DIGEST_SUMMARY_LIMIT + 1,
-                          keep_paragraphs=True)
-    if len(summary) > DIGEST_SUMMARY_LIMIT:
-        problems.append(f"summary trimmed to {DIGEST_SUMMARY_LIMIT} characters")
-        summary = summary[:DIGEST_SUMMARY_LIMIT]
+    paragraphs, notes = _clean_paragraphs(decisions.get("summary"))
+    problems += notes
 
     keywords: list[dict] = []
     seen_words: set[str] = set()
@@ -578,7 +630,7 @@ def validate_digest_decisions(decisions: dict, known_ids: set[str],
         "schema": DIGEST_SCHEMA,
         "day": decisions.get("day"),
         "model": _clean_text(decisions.get("model"), 120),
-        "summary": summary,
+        "summary": paragraphs,
         "keywords": keywords,
         "source_ids": source_ids,
         "stats_note": _clean_text(decisions.get("stats_note"), 300),
@@ -731,7 +783,9 @@ def apply_digest_decisions(digest: dict, item_index: dict[str, dict]) -> dict:
         "schema": digest.get("schema"),
         "day": digest.get("day"),
         "model": digest.get("model"),
-        "summary": digest.get("summary"),
+        # Already [{text, keywords}] by the time it gets here; validation owns
+        # that shape so the renderer does not have to guess at it.
+        "summary": digest.get("summary") or [],
         "keywords": digest.get("keywords") or [],
         "sources": audited,
         "stats_note": digest.get("stats_note"),

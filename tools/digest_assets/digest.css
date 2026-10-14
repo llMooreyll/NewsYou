@@ -471,13 +471,22 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
    digest
    ====================================================================== */
 .dg{max-width:900px}
-.dg-hl{padding:30px 0 22px;font-family:var(--serif);font-size:clamp(20px,2.3vw,27px);line-height:1.55;font-weight:600;
-  letter-spacing:.005em;color:var(--fg)}
+.dg-sum{padding:30px 0 6px}
+/* One paragraph per topic. The old single block of 600 characters at 27px was
+   a wall of text; separate paragraphs are what make the day readable at all. */
+.dg-sum .dg-hl{font-family:var(--serif);font-size:clamp(18px,2vw,23px);line-height:1.62;
+  font-weight:600;letter-spacing:.005em;color:var(--fg)}
+.dg-sum .dg-hl + .dg-hl{margin-top:.85em;color:var(--fg-2);font-weight:500}
+/* The keywords the model attached to this paragraph, marked where they occur.
+   <mark> needs its background cleared: the browser default is yellow. */
+.dg-sum mark.kw{background:none;color:inherit;font-weight:700;
+  box-shadow:inset 0 -.14em 0 var(--accent-line);transition:box-shadow var(--t-fast)}
+.dg-sum .dg-hl:hover mark.kw{box-shadow:inset 0 -.42em 0 var(--accent-line)}
 /* Keyword cloud. --w is the model's 0-100 weight, so the size ordering is the
    model's judgement rather than a class ladder. The clamp keeps the extremes
    readable without capping the spread. */
 .dg-kw{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:baseline;
-  padding-bottom:26px;border-bottom:1px solid var(--line)}
+  padding:22px 0 26px;border-bottom:1px solid var(--line)}
 .dg-kw span{font-family:var(--serif);font-weight:600;letter-spacing:.01em;
   font-size:clamp(11px,calc(11px + var(--w,50) * 0.06px),17px);
   color:color-mix(in srgb,var(--fg) calc(40% + var(--w,50) * 0.6%),var(--bg))}
@@ -491,6 +500,13 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
 .cite{font-family:var(--mono);font-size:10.5px;color:var(--fg-4);
   transition:color var(--t-fast)}
 .cite:hover{color:var(--accent-2)}
+/* The source name is what the reader scans for, so it gets the contrast and
+   the breathing room; the surrounding "去…看原文" stays quiet. */
+.cite .src{color:var(--fg-2);margin:0 .34em;font-weight:500}
+.cite:hover .src{color:var(--accent-2)}
+.cite svg{width:9px;height:9px;margin-left:.28em;vertical-align:-1px;
+  opacity:.65;transition:transform var(--t-fast) var(--ease),opacity var(--t-fast)}
+.cite:hover svg{opacity:1;transform:translate(1px,-1px)}
 /* scrollIntoView uses block:nearest, so the offset comes from scroll-margin:
    without it a target lands under the sticky header */
 [id^="it-"]{scroll-margin-top:calc(var(--head-h) + 24px)}

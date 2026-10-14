@@ -271,7 +271,8 @@ class StageTwoRun(unittest.TestCase):
 
     def decide(self, day: str) -> None:
         self.write(self.ai / "digest_decisions.json", {
-            "schema": ai_stage.DIGEST_SCHEMA, "day": day, "summary": f"summary of {day}",
+            "schema": ai_stage.DIGEST_SCHEMA, "day": day,
+            "summary": [{"text": f"summary of {day}", "keywords": ["主题"]}],
             "keywords": [{"text": "主题", "weight": 90}],
             "source_ids": [ai_stage.item_id(self.story)]})
 
@@ -290,7 +291,8 @@ class StageTwoRun(unittest.TestCase):
     def test_decisions_for_this_day_are_applied(self):
         self.decide(DAY)
         self.run_stage()
-        self.assertEqual(self.panel()["summary"], f"summary of {DAY}")
+        self.assertEqual([p["text"] for p in self.panel()["summary"]],
+                         [f"summary of {DAY}"])
 
     def test_decisions_from_another_day_are_not_applied(self):
         self.decide(DAY_BEFORE)
@@ -312,7 +314,7 @@ class StageTwoRun(unittest.TestCase):
         with mock.patch.object(ai_model.shutil, "which", return_value="/fake/pi"), \
              mock.patch.object(ai_model, "_invoke", return_value=answer):
             self.run_stage(backend="pi")
-        self.assertEqual(self.panel()["summary"], "fresh")
+        self.assertEqual([p["text"] for p in self.panel()["summary"]], ["fresh"])
         self.assertEqual(self.panel()["day"], DAY)
 
     def test_a_source_file_from_an_earlier_day_is_skipped(self):

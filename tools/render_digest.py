@@ -587,10 +587,12 @@ def _cite(ref: dict) -> str:
         return ""
     key = str(key)
     # "去…看原文" rather than the bare source name: the chip is an action, and
-    # a lone "少数派 ↗" next to a summary reads like a label, not a link.
-    label = f"去{name}看原文"
+    # a lone "少数派" next to a summary reads like a label, not a link. The
+    # source name is set apart so a long one ("LoopDNS资讯播报") still parses
+    # at a glance, and the arrow marks it as something that leaves this line.
+    label = f'去<span class="src">{esc(name)}</span>看原文{ICON["out"]}'
     return (f'<a class="cite" href="#it-{esc(key)}" data-jump="{esc(key)}" '
-            f'title="{esc(ref.get("title") or name)}">{esc(label)}</a>')
+            f'title="{esc(ref.get("title") or name)}">{label}</a>')
 
 def _cites(refs) -> str:
     """One chip per distinct item, in the order given."""
@@ -660,6 +662,55 @@ def _keyword_cloud(keywords: list[dict]) -> str:
         for word in keywords or [] if word.get("text"))
     return f'<div class="dg-kw">{cells}</div>' if cells else ""
 
+def _mark_keywords(text: str, words) -> str:
+    """Wrap the first occurrence of each keyword inside its own paragraph.
+
+    The model names the words a paragraph is about; marking them in place is
+    what ties the word cloud to the prose — otherwise the two read as unrelated
+    blocks. Matching happens on the escaped text so the result is always valid
+    HTML, spans are found on the untouched string and applied in one pass, and
+    a word the model paraphrased away is simply skipped rather than treated as
+    an error: the marking is a reading aid, not a contract.
+    """
+    escaped = esc(text)
+    spans: list[tuple[int, int]] = []
+    for word in sorted({str(w) for w in words or [] if w}, key=len, reverse=True):
+        needle = esc(word)
+        start = 0
+        while True:
+            at = escaped.find(needle, start)
+            if at < 0:
+                break
+            end = at + len(needle)
+            # Longest first, so "AI 应用" wins over "AI"; overlapping matches
+            # are skipped rather than nested.
+            if not any(at < b and a < end for a, b in spans):
+                spans.append((at, end))
+                break
+            start = at + 1
+    if not spans:
+        return escaped
+    spans.sort()
+    out, pos = [], 0
+    for a, b in spans:
+        out.append(escaped[pos:a])
+        out.append(f'<mark class="kw">{escaped[a:b]}</mark>')
+        pos = b
+    out.append(escaped[pos:])
+    return "".join(out)
+
+def _summary_block(summary: list[dict]) -> str:
+    """The day's summary: one paragraph per topic, keywords marked in place."""
+    paragraphs = []
+    for index, para in enumerate(summary or [], 1):
+        text = (para.get("text") or "").strip()
+        if not text:
+            continue
+        paragraphs.append(
+            f'<p class="dg-hl rv" style="--i:{index}">'
+            f'{_mark_keywords(text, para.get("keywords"))}</p>')
+    return f'<div class="dg-sum">{"".join(paragraphs)}</div>' if paragraphs else ""
+
 def render_digest_panel(digest: dict | None, categories: dict | None = None) -> str:
     """今日汇总: the day's summary, then the news categories, then discussion.
 
@@ -669,7 +720,9 @@ def render_digest_panel(digest: dict | None, categories: dict | None = None) -> 
     other.
     """
     digest = digest or {}
-    summary = (digest.get("summary") or "").strip()
+    summary = digest.get("summary") or []
+    if isinstance(summary, str):                  # a hand-written panel file
+        summary = [{"text": summary}] if summary.strip() else []
     keywords = digest.get("keywords") or []
     sides = (categories or {}).get("sides") or {}
     news = sides.get("news") or {}
@@ -681,9 +734,9 @@ def render_digest_panel(digest: dict | None, categories: dict | None = None) -> 
 
     secs: list[str] = []
     if summary or keywords:
-        body = (f'<p class="dg-hl rv">{esc(summary)}</p>' if summary else "")
         secs.append(f'<section class="sec" id="dg-summary">'
-                    f'<h2 class="sec-h">汇总</h2>{body}{_keyword_cloud(keywords)}</section>')
+                    f'<h2 class="sec-h">汇总</h2>'
+                    f'{_summary_block(summary)}{_keyword_cloud(keywords)}</section>')
 
     for anchor, heading, side in (("dg-cats", "新闻", news), ("dg-disc", "讨论", discussion)):
         block = _side_section(anchor, heading, side)

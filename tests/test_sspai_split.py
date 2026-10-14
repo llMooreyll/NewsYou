@@ -357,7 +357,8 @@ class DigestSummary(unittest.TestCase):
         """It is the only global view of the day; losing it would empty the
         panel."""
         digest, problems = self.validate({"summary": "长" * 2000})
-        self.assertEqual(len(digest["summary"]), ai_stage.DIGEST_SUMMARY_LIMIT)
+        total = sum(len(p["text"]) for p in digest["summary"])
+        self.assertEqual(total, ai_stage.DIGEST_SUMMARY_LIMIT)
         self.assertTrue(any("trimmed" in p for p in problems))
 
     def test_an_unknown_audit_id_is_rejected(self):
@@ -367,7 +368,7 @@ class DigestSummary(unittest.TestCase):
 
     def test_the_summary_survives_a_bad_audit_id(self):
         digest, _ = self.validate({"summary": "s", "source_ids": ["a:1", "nope"]})
-        self.assertEqual(digest["summary"], "s")
+        self.assertEqual([p["text"] for p in digest["summary"]], ["s"])
         self.assertEqual(digest["source_ids"], ["a:1"])
 
     def test_an_alias_resolves_in_the_audit_list(self):
@@ -384,13 +385,111 @@ class DigestSummary(unittest.TestCase):
         self.assertEqual(digest, {})
         self.assertTrue(any("old schema" in p for p in problems))
 
+class SummaryParagraphs(unittest.TestCase):
+    """`summary` is a list of paragraphs, each naming the words it is about."""
+
+    def validate(self, value, known=("a:1",)):
+        return ai_stage.validate_digest_decisions({"summary": value}, set(known))
+
+    def texts(self, digest):
+        return [p["text"] for p in digest["summary"]]
+
+    def test_a_plain_string_still_works(self):
+        """A hand-written decisions file should not have to change shape."""
+        digest, problems = self.validate("一段话。")
+        self.assertEqual(self.texts(digest), ["一段话。"])
+        self.assertEqual(digest["summary"][0]["keywords"], [])
+        self.assertEqual(problems, [])
+
+    def test_paragraphs_keep_their_order(self):
+        digest, _ = self.validate([{"text": "第一段。"}, {"text": "第二段。"}])
+        self.assertEqual(self.texts(digest), ["第一段。", "第二段。"])
+
+    def test_each_paragraph_keeps_its_own_keywords(self):
+        digest, _ = self.validate([{"text": "甲和乙。", "keywords": ["甲", "乙"]},
+                                   {"text": "丙。", "keywords": ["丙"]}])
+        self.assertEqual(digest["summary"][0]["keywords"], ["甲", "乙"])
+        self.assertEqual(digest["summary"][1]["keywords"], ["丙"])
+
+    def test_paragraph_keywords_are_capped_and_deduped(self):
+        digest, _ = self.validate([{"text": "t", "keywords":
+                                    ["一", "二", "三", "四", "五", "六", "一"]}])
+        words = digest["summary"][0]["keywords"]
+        self.assertEqual(len(words), ai_stage.DIGEST_PARAGRAPH_KEYWORDS)
+        self.assertEqual(len(set(words)), len(words))
+
+    def test_an_empty_paragraph_is_skipped(self):
+        digest, problems = self.validate([{"text": "有内容"}, {"text": "   "}])
+        self.assertEqual(self.texts(digest), ["有内容"])
+        self.assertTrue(any("empty paragraph" in p for p in problems))
+
+    def test_too_many_paragraphs_are_trimmed(self):
+        digest, problems = self.validate([{"text": f"第{i}段。"} for i in range(10)])
+        self.assertEqual(len(digest["summary"]), ai_stage.DIGEST_PARAGRAPH_LIMIT)
+        self.assertTrue(any("paragraphs" in p for p in problems))
+
+    def test_the_total_length_is_bounded_across_paragraphs(self):
+        digest, problems = self.validate([{"text": "长" * 900}, {"text": "长" * 900}])
+        self.assertLessEqual(sum(len(p["text"]) for p in digest["summary"]),
+                             ai_stage.DIGEST_SUMMARY_LIMIT)
+        self.assertTrue(any("trimmed" in p for p in problems))
+
+    def test_a_paragraph_that_is_not_an_object_is_rejected(self):
+        digest, problems = self.validate([{"text": "好"}, 42])
+        self.assertEqual(self.texts(digest), ["好"])
+        self.assertTrue(any("not an object" in p for p in problems))
+
+class KeywordMarking(unittest.TestCase):
+    """The keywords are marked inside their own paragraph.
+
+    This is what ties the word cloud to the prose; a word the model paraphrased
+    away is skipped rather than treated as an error.
+    """
+
+    def mark(self, text, words):
+        return render_digest._mark_keywords(text, words)
+
+    def test_a_keyword_is_wrapped_where_it_occurs(self):
+        self.assertEqual(self.mark("苹果发布了新品。", ["苹果"]),
+                         '<mark class="kw">苹果</mark>发布了新品。')
+
+    def test_only_the_first_occurrence_is_marked(self):
+        out = self.mark("苹果，又是苹果。", ["苹果"])
+        self.assertEqual(out.count('<mark class="kw">'), 1)
+
+    def test_a_missing_keyword_is_skipped_not_an_error(self):
+        self.assertEqual(self.mark("苹果发布了新品。", ["安卓"]), "苹果发布了新品。")
+
+    def test_a_longer_keyword_wins_over_a_shorter_one(self):
+        out = self.mark("AI 应用增长很快。", ["AI", "AI 应用"])
+        self.assertEqual(out.count('<mark class="kw">'), 1)
+        self.assertIn(">AI 应用</mark>", out)
+
+    def test_overlapping_keywords_are_not_nested(self):
+        out = self.mark("AI 应用和 AI 模型。", ["AI", "AI 应用"])
+        self.assertNotIn('<mark class="kw"><mark', out)
+        self.assertEqual(out.count("<mark"), out.count("</mark>"))
+
+    def test_html_in_the_text_is_escaped_before_marking(self):
+        out = self.mark("a < b & c", ["b"])
+        self.assertIn("&lt;", out)
+        self.assertIn('<mark class="kw">b</mark>', out)
+
+    def test_a_keyword_with_markup_characters_is_matched_safely(self):
+        out = self.mark("A & B 上升", ["A & B"])
+        self.assertIn('<mark class="kw">A &amp; B</mark>', out)
+
+    def test_no_keywords_means_no_marking(self):
+        self.assertEqual(self.mark("一段话。", []), "一段话。")
+        self.assertEqual(self.mark("一段话。", None), "一段话。")
+
 class SummaryRendering(unittest.TestCase):
     def render(self, digest, categories=None):
         return render_digest.render({"sspai": {"items": [], "status": {}, "day": DAY}},
                                     digest, Path("/tmp/x.html"), False, {}, categories)
 
     def test_the_summary_and_keywords_are_drawn(self):
-        html = self.render({"summary": "今天的面貌。",
+        html = self.render({"summary": [{"text": "今天的面貌。"}],
                             "keywords": [{"text": "大词", "weight": 90},
                                          {"text": "小词", "weight": 10}]})
         self.assertIn("今天的面貌。", html)
@@ -399,12 +498,13 @@ class SummaryRendering(unittest.TestCase):
         self.assertIn("--w:10", html)
 
     def test_the_old_sections_are_gone(self):
-        html = self.render({"summary": "s", "keywords": []})
+        html = self.render({"summary": [{"text": "s"}], "keywords": []})
         for dead in ('id="dg-lead"', 'id="dg-items"', "要点", "脉络"):
             self.assertNotIn(dead, html)
 
     def test_the_rail_lists_the_summary(self):
-        html = self.render({"summary": "s", "keywords": [{"text": "甲", "weight": 5}]})
+        html = self.render({"summary": [{"text": "s"}],
+                            "keywords": [{"text": "甲", "weight": 5}]})
         self.assertIn('data-target="dg-summary"', html)
         self.assertIn("汇总", html)
 

@@ -117,21 +117,27 @@ def build_keywords(entries: list[dict], id_of, merges: list[dict]) -> list[dict]
             for word, n in ranked]
 
 def build_summary(entries: list[dict], id_of, merges: list[dict],
-                  channels: list[str]) -> tuple[str, list[str]]:
+                  channels: list[str]) -> tuple[list[dict], list[str]]:
     """A stand-in for the model's prose, plus the ids it would have cited.
 
-    Derived from the data like everything else here: the sources that carried
-    the most, named as a sentence. Real usage replaces this.
+    Two paragraphs rather than one, because that is the shape the real answer
+    takes: one thread per paragraph, each naming the words it is about so the
+    page can mark them. Derived from the data like everything else here.
     """
     if not entries:
-        return "当日无内容。", []
+        return [{"text": "当日无内容。", "keywords": []}], []
     scored = sorted(entries, key=lambda e: -(len((e.get("extra") or {}).get("text") or "")))
     cited = [id_of(e) for e in scored[:12]]
-    busiest = sorted({e.get("source") for e in entries if e.get("source")})[:5]
-    return (f"当日共 {len(entries)} 条，来自 {len(busiest)} 个来源"
-            f"（{('、'.join(busiest))}）；"
-            f"{len(channels)} 个 Telegram 频道有更新，{len(merges)} 组跨频道重复已合并。"
-            f"本条为演示文案，用于替代模型输出。"), cited
+    busiest = sorted({e.get("source") for e in entries if e.get("source")})
+    return [
+        {"text": f"当日共 {len(entries)} 条，来自 {len(busiest)} 个来源"
+                 f"（{('、'.join(busiest[:5]))}）。",
+         "keywords": busiest[:3]},
+        {"text": f"{len(channels)} 个 Telegram 频道有更新，"
+                 f"{len(merges)} 组跨频道重复已合并。"
+                 f"本条为演示文案，用于替代模型输出。",
+         "keywords": ["Telegram"]},
+    ], cited
 
 def load_items(collected: Path) -> dict[str, list[dict]]:
     """Every collected source, not just Telegram: the classification covers the

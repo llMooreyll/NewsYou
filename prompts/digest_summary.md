@@ -50,7 +50,10 @@ Return **JSON only**, no prose, no markdown fence:
   "schema": "newsletter.digest-decisions/2",
   "day": "2026-10-12",
   "model": "<your model identifier>",
-  "summary": "两三句话概括今天整体面貌，可以多句。",
+  "summary": [
+    {"text": "今天的主线是…，两三句话。", "keywords": ["Gemini 4", "苹果发布会"]},
+    {"text": "另一条线是…", "keywords": ["存储涨价"]}
+  ],
   "keywords": [
     {"text": "Gemini 4", "weight": 95},
     {"text": "苹果发布会", "weight": 88},
@@ -63,9 +66,13 @@ Return **JSON only**, no prose, no markdown fence:
 
 ### `summary`
 
-**Cover the shape of the day, not a list of items.**
+**Cover the shape of the day, not a list of items — and break it into
+paragraphs.**
 
-- Two to four sentences, under 800 characters. One paragraph.
+- **2–4 paragraphs, one topic each.** Each paragraph is 2–3 sentences. Total
+  under 900 characters.
+- A new paragraph means a new thread: AI, then hardware, then the supply chain,
+  then security. One paragraph per subject, not one paragraph for everything.
 - Say what the day was about: which subjects dominated, what was genuinely new,
   whether anything cut across sources.
 - **Do not enumerate.** "AI 模型与监管同日推进，硬件集中发布，其余为社区讨论"
@@ -73,6 +80,19 @@ Return **JSON only**, no prose, no markdown fence:
   summary, and the categories below already do that job.
 - Do not name every item, and do not use a bulleted form.
 - Write in the language most of the input is in.
+
+**Each paragraph carries `keywords`**: the two or three nouns a reader would
+use to describe that paragraph. They are **marked inside the paragraph text**,
+so they have to appear there verbatim:
+
+- Copy them out of your own paragraph text exactly. A word that is not in the
+  paragraph cannot be marked, and is dropped.
+- Prefer the specific over the generic: "Gemini 4 Argon" beats "AI".
+- At most 5, usually 2–3. Fewer is fine; do not pad.
+
+The top-level `keywords` list below is separate and different: it is the day's
+overall ranking, across all paragraphs. The words in it should be the ones that
+matter most from the paragraph keywords.
 
 ### `keywords`
 
