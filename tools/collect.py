@@ -110,12 +110,15 @@ def _stamp_identity(name: str, items: list[dict], source_nature: dict,
             name, unit, source_nature=source_nature, unit_nature=unit_nature)
 
     # A linux.do section name comes from the page, so a typo in sources.units is
-    # invisible at configuration time. Saying so here is the only chance.
-    wanted = {k.split(":", 1)[1] for k in unit_nature if k.startswith(f"{name}:")}
-    unmatched = sorted(wanted - units_seen)
-    if unmatched:
-        print(f"  ! {name}: sources.units names no item matched: {', '.join(unmatched)}",
-              file=sys.stderr)
+    # invisible at configuration time. Saying so here is the only chance. A
+    # derived unit (sspai's 派早报) is not a typo when it goes unmatched — the
+    # brief simply had no split that day — so it is not reported.
+    if name not in registry.DERIVED_UNITS:
+        wanted = {k.split(":", 1)[1] for k in unit_nature if k.startswith(f"{name}:")}
+        unmatched = sorted(wanted - units_seen)
+        if unmatched:
+            print(f"  ! {name}: sources.units names no item matched: {', '.join(unmatched)}",
+                  file=sys.stderr)
 
 def _postprocess(name: str, items: list[dict], args, outdir: Path) -> list[dict]:
     """Telegram-only: deterministic pre-dedupe plus image download."""
@@ -283,6 +286,11 @@ def main() -> int:
                           if not r.get("ok")]
                 if failed:
                     print(f"  partial failure: {', '.join(failed)}", file=sys.stderr)
+            # Facts about a source that no item can carry. sspai reports
+            # whether today's 派早报 exists at all; with no brief there is no
+            # item to read it from, and the page needs to say so.
+            if hasattr(module, "last_state"):
+                statuses[name].update(module.last_state())
             fresh = ("today" if statuses[name]["updated_today"]
                      else f"{statuses[name]['staleness_days']}d ago")
             bodies = statuses[name]["fulltext_fetched"]

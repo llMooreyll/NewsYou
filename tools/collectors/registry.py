@@ -65,21 +65,41 @@ NATURE_VALUES = ("news", "discussion", "longform")
 
 # Source-level nature. A source not listed here is news, so the common case
 # needs no configuration at all.
+#
+# sspai, latepost and geekpark are long-form: a 派早报 story is a day's news
+# (see UNIT_NATURE below) but a 晚点 report or a 极客公园 piece is an article,
+# not an event, so none of the three belongs in the day's categories.
 SOURCE_NATURE = {
     "linuxdo": "discussion",
     "hackernews": "discussion",
+    "sspai": "longform",
+    "latepost": "longform",
+    "geekpark": "longform",
     "ruanyifeng": "longform",
     "anywayfm": "longform",
 }
 
 # Where a source names a sub-unit inside an item. This is a data location, not
 # a preference, which is why it lives here and not in config.toml.
-UNIT_FIELD = {"telegram": "channel", "linuxdo": "section_name"}
+#
+# `sspai`'s unit is not a field of the raw data — it is set by the collector
+# when it splits 派早报 into per-story items. Everything else in that source is
+# long-form, so the split is what decides which items reach classification.
+UNIT_FIELD = {"telegram": "channel", "linuxdo": "section_name", "sspai": "column"}
+
+# Sources whose unit is derived by the collector rather than read from the
+# source's own data. A unit name here is never a configuration typo, so
+# collect.py skips the "sources.units names no item matched" warning for them.
+DERIVED_UNITS = {"sspai"}
 
 # "<source>:<unit>" -> nature. The shipped default for sources.units; a unit
 # missing from it follows its source. Telegram is one source carrying channels
 # of all three natures, so almost all of its overrides are here.
 UNIT_NATURE = {
+    # 少数派 is long-form; only the stories split out of its daily brief are
+    # news. The collector sets `column` on those, so this is what puts them in
+    # the classification and leaves the rest of the source out of it.
+    "sspai:派早报": "news",
     "telegram:reorx_share": "discussion",
     "telegram:notonlyshare": "discussion",
     "telegram:bigwalnut": "discussion",

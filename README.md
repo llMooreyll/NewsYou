@@ -2,7 +2,7 @@
 
 个人 Newsletter 聚合系统：把中英文多信源的一天内容抓下来，可选地交给模型去重、筛选，最后渲染成**一个自包含的 HTML 文件**。
 
-- **11 个信源**：少数派、Telegram（18 个频道）、linux.do、晚点、极客公园、奇客 Solidot、阮一峰、Anyway.Now、Hacker News、微博热搜、知乎热榜
+- **11 个信源**：少数派（派早报逐条拆开）、Telegram（18 个频道）、linux.do、晚点、极客公园、奇客 Solidot、阮一峰、Anyway.Now、Hacker News、微博热搜、知乎热榜
 - **单文件产出**：图片内联 base64，**零外部请求**——断网、离线、直接发文件都能看
 - **模型可选**：默认调用，`AI=none` 完全不调；模型只输出「决策」，脚本校验后应用
 - **一切可配置**：`config/config.toml`，删掉整个文件也能跑
@@ -163,6 +163,7 @@ codex  codex exec --skip-git-repo-check --sandbox read-only --model <m> "<prompt
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `channels` | 18 个频道 | 要跟的公开频道。**加频道 = 加一个字符串** |
+| — | — | 面板与引用 chip 显示频道的中文名（取自 t.me 页面，零额外请求）；取不到时回退 `@频道id` |
 | `pages` | `4` | 每个频道翻几页（每页约 20 条） |
 | `day` | `"auto"` | 取哪天的消息。`auto` \| `today` \| `yesterday` \| `YYYY-MM-DD` |
 
@@ -183,7 +184,7 @@ codex  codex exec --skip-git-repo-check --sandbox read-only --model <m> "<prompt
 | `enabled` | `[]` | **白名单**。非空时只抓这些源。空 = 全部 |
 | `[sources.limits]` | 各源不同 | 每个源抓多少条 |
 | `[sources.labels]` | 各源中文名 | 面板显示名 |
-| `[sources.nature]` | 见下 | 哪些源是讨论/长文。**没列到的一律是新闻** |
+| `[sources.nature]` | 见下 | 哪些源是讨论/长文。**没列到的一律是新闻**；列表是**替换**语义 |
 | `[sources.units]` | 见下 | 单个频道或分节的性质覆盖，键为 `源:单元` |
 
 > **关源**用 `enabled`（从 `order` 里删掉**不会**关掉它，只会改变排序）；**改名**用 `labels`。
@@ -193,8 +194,10 @@ codex  codex exec --skip-git-repo-check --sandbox read-only --model <m> "<prompt
 ```toml
 [sources.nature]
 discussion = ["linuxdo", "hackernews"]      # 分享/讨论 → 2d
-longform   = ["ruanyifeng", "anywayfm"]     # 不定期长文 → 不参与分类
+longform   = ["sspai", "latepost", "geekpark", "ruanyifeng", "anywayfm"]
 ```
+
+⚠️ 每个列表**替换**内置默认而不是追加，所以列出一个源就意味着列出全部；漏掉一个源会让它静默回到新闻侧。
 
 | 值 | 含义 | 参与分类 | 页面位置 |
 |---|---|---|---|
@@ -206,10 +209,13 @@ longform   = ["ruanyifeng", "anywayfm"]     # 不定期长文 → 不参与分�
 
 ```toml
 [sources.units]
+"sspai:派早报"          = "news"        # 少数派是长文源，只有派早报进分类
 "telegram:reorx_share" = "discussion"
 "telegram:wxbyg"       = "longform"
 "linuxdo:站外速览"      = "news"
 ```
+
+少数派的 `派早报` 不是它自己的字段，而是采集器拆块时写上的标记。
 
 没列到的单元跟随其源，所以只需要写例外。配置写错会在启动时报错退出，不会静默回落。
 
@@ -472,6 +478,25 @@ Telegram 一条消息里可能有**两个** text div：引用的原消息（`js-
 
 合并会保留 `originals[]`（含原文和链接），前端有浮层可展开核对——**不丢失任何原始信息**。
 
+### 少数派的派早报：采集层拆块
+
+派早报是**一期含多条的合集**，不是一条新闻。采集时按正文的 `<h2>` 小节拆成一条一节：
+
+```
+API 列表(20 篇) → 取最新一期派早报 → 抓正文 → 按小节拆分
+                                              ↓
+                    推广节丢弃 / 新闻节 → 独立条目 / 简讯节 → 按顶层 <li> 再拆
+                                              ↓
+                        子条目取代整期，下游全部看到拆开后的新闻
+```
+
+- **id**：`sspai:<父hash>:<序号>`，序号是保留节内的 1-based 序号
+- **推广节**（`少数派的近期动态`、`你可能错过的文章`）直接丢弃
+- **简讯节**（`不妨一看的简讯` 等）按顶层 `<li>` 再拆，每条以首句为标题；嵌套的细节项归属其父条
+- **只取最新一期**：窗口里的旧期不进条目
+- **派早报无条件抓正文**：拆块依赖小节，不受 `collect.fulltext` 策略约束（有意例外）
+- **周末停稿**：派早报周六周日不更新（实测 21 期里周六周日各 0 期）。抓不到时显示「今日停稿」；工作日但当天那期还没出则显示「尚未发布」
+
 **2c / 2d · 分类**（`prompts/classify.md`）
 
 同一个提示词、同一套校验、同一套应用逻辑，跑在按 `nature` 切开的两半数据上：
@@ -502,14 +527,15 @@ Telegram 一条消息里可能有**两个** text div：引用的原消息（`js-
 
 所以每个类目块**覆盖整天**：已归类 218/220 会直接印在页面上。
 
-**2b · 全量重要性提取**（`prompts/digest_highlights.md`）
+**2b · 全天汇总**（`prompts/digest_summary.md`）
 
-输入是**全部 11 个源**的条目，输出要闻排序。
+输入是**全部 11 个源**的条目（含长文），输出一段覆盖全天面貌的汇总 + 带权重的关键字。
 
-- 双信号判断重要性：**A 交叉印证**（多源报道同一事）/ **B 内在重要性**（单一权威来源的重大事件）
 - **不删除任何条目**，只在顶部叠加一个「今日汇总」面板
-- 服务端按 `importance` **重新排序**并丢弃模型给的 `rank`（顺序由脚本决定）
-- 输入带上了 2c/2d 已经分好的 `category`，但头条是**事件**不是类目：同一个事件可以跨多个类目
+- 汇总覆盖**全天面貌**，不逐条罗列；关键字是纯文本标签，**字号由模型给的权重决定**
+- 长文**参与**汇总（深度报道也可能是一天的重点），只是不参与分类
+- 模型额外输出 `source_ids`（**不显示**）作为审计线索，脚本校验这些 id 确实存在
+- ⚠️ 汇总本身是自由文本，**没有 id 锚点**：脚本能查出「引用了不存在的条目」，但查不出「某句话与其依据不符」
 
 ### 校验层（`ai_stage.py`）
 
@@ -568,7 +594,7 @@ BACKEND_TABLE = {
 ### 面板构成
 
 ```
-今日汇总    ← 今日头条 + 分类 + 讨论（三块，任一有内容即出现）
+今日汇总    ← 汇总（全天面貌 + 带权关键字）+ 分类 + 讨论（任一有内容即出现）
 少数派 / Telegram / linux.do / 晚点 / 极客公园 / 奇客 Solidot /
 阮一峰 / Anyway.Now / Hacker News / 微博热搜 / 知乎热榜
 ```
@@ -736,7 +762,7 @@ tools/
 prompts/
   telegram_merge.md       阶段 2a 提示词
   classify.md             阶段 2c / 2d 提示词
-  digest_highlights.md    阶段 2b 提示词
+  digest_summary.md       阶段 2b 提示词
 
 site/digest.html          产物（单文件，零外部请求）
 tests/                    离线回归测试

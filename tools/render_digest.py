@@ -84,10 +84,6 @@ def apply_config(cfg) -> None:
 # Panel headings where the full name does not fit a tab.
 PANEL_TITLE = {"linuxdo": "linux.do 晚报", "latepost": "晚点 LatePost", "ruanyifeng": "阮一峰的网络日志"}
 
-TOPIC_LABEL = {
-    "technology": "科技", "ai": "AI", "business": "商业", "policy": "政策",
-    "society": "社会", "security": "安全", "internet": "互联网", "other": "其他",
-}
 
 # Dates from these sources carry no real time of day; show the date only.
 DATE_ONLY_SOURCES = {"api_relative", "relative_balloon", "issue_date", "archive_month"}
@@ -535,9 +531,22 @@ def expander(label: str, count: str, inner: str) -> str:
 # digest panel
 # --------------------------------------------------------------------------
 
+def _channel_name(ref: dict) -> str:
+    """What to show for a channel: its display name, else @<id>.
+
+    The display name comes from the t.me page header ("在花", not "zaihuapd").
+    A few channels are named in English or mix scripts; whatever the page says
+    is shown, and the id remains the fallback so a missing title never renders
+    as blank.
+    """
+    channel = ref.get("channel")
+    if not channel:
+        return ""
+    return ref.get("channel_title") or ("@" + str(channel))
+
 def _ref_name(ref: dict) -> str:
     if ref.get("channel"):
-        return "@" + ref["channel"]
+        return _channel_name(ref)
     return ref.get("source_name") or SOURCE_META.get(ref.get("source") or "", (ref.get("source") or "",))[0]
 
 
@@ -615,62 +624,43 @@ def _side_section(anchor: str, heading: str, side: dict) -> str:
             f'<span class="n">{len(categories)}</span>{aside}</h2>'
             + _category_sections(categories) + "</section>")
 
+def _keyword_cloud(keywords: list[dict]) -> str:
+    """Keywords as plain labels whose size follows the model's own weight.
+
+    The weight is the model's judgement of how much each word matters to the
+    day, so it drives the type size directly: `--w` is 0–100 and the stylesheet
+    maps it to a size. No fixed ladder of classes, because the ranking is the
+    model's to make, not the stylesheet's.
+    """
+    cells = "".join(
+        f'<span style="--w:{int(word.get("weight") or 0)}">{esc(word.get("text"))}</span>'
+        for word in keywords or [] if word.get("text"))
+    return f'<div class="dg-kw">{cells}</div>' if cells else ""
+
 def render_digest_panel(digest: dict | None, categories: dict | None = None) -> str:
-    """今日汇总: the briefing, then the news categories, then discussion.
+    """今日汇总: the day's summary, then the news categories, then discussion.
 
     The two inputs come from different files and either may be missing. A
-    classification that failed must not cost the briefing, and a briefing that
+    classification that failed must not cost the summary, and a summary that
     failed must not cost the categories, so neither is a precondition for the
     other.
     """
     digest = digest or {}
-    cards = digest.get("cards") or []
+    summary = (digest.get("summary") or "").strip()
+    keywords = digest.get("keywords") or []
     sides = (categories or {}).get("sides") or {}
     news = sides.get("news") or {}
     discussion = sides.get("discussion") or {}
     news_cats = news.get("categories") or []
     disc_cats = discussion.get("categories") or []
-    if not cards and not news_cats and not disc_cats:
+    if not summary and not keywords and not news_cats and not disc_cats:
         return '<p class="empty">今日无汇总条目</p>'
 
-    def topics(items) -> str:
-        return "".join(f'<span class="tp-c">{esc(TOPIC_LABEL.get(t, t))}</span>' for t in items or [])
-
-    def refs(items) -> str:
-        seen, out = set(), []
-        for ref in items or []:
-            name = _ref_name(ref)
-            if not name or name in seen:
-                continue
-            seen.add(name)
-            out.append(ext(ref.get("url"), esc(name) + " ↗"))
-        return "".join(out)
-
-    lead, rest = (cards[0], cards[1:]) if cards else ({}, [])
     secs: list[str] = []
-    if cards:
-        lead_html = (f'<article class="dg-lead rv" style="--i:1"><div class="no">01 · 头条</div>'
-                     f'<h2>{esc(lead.get("title"))}</h2>'
-                     + ("".join(f"<p>{esc(x)}</p>" for x in re.split(r"\n\s*\n", lead.get("summary") or "") if x.strip())
-                        if lead.get("summary") and lead.get("summary") != lead.get("title") else "")
-                     + f'<div class="dg-m">{topics(lead.get("topics"))}'
-                     + (f'<span>{esc(lead.get("why"))}</span>' if lead.get("why") else "")
-                     + f'<span>重要度 {esc(lead.get("importance"))}</span>{_cites(lead.get("refs"))}</div></article>')
-        head = f'<p class="dg-hl rv">{esc(digest.get("headline"))}</p>' if digest.get("headline") else ""
-        secs.append(f'<section class="sec" id="dg-lead">{head}{lead_html}</section>')
-
-    if rest:
-        rows = "".join(
-            f'<article class="dg-it rv" style="--i:{i + 2}"><div class="no">{int(c.get("rank") or i + 2):02d}</div>'
-            f'<div><h3>{esc(c.get("title"))}</h3>'
-            + (f'<p>{esc(re.sub(r"\s+", " ", c.get("summary") or ""))}</p>' if c.get("summary") and c.get("summary") != c.get("title") else "")
-            + f'<div class="dg-m">{topics(c.get("topics"))}'
-            + (f'<span>{esc(c.get("why"))}</span>' if c.get("why") else "")
-            + f'{_cites(c.get("refs"))}</div></div>'
-            f'<div class="sc">{esc(c.get("importance"))}</div></article>'
-            for i, c in enumerate(rest)
-        )
-        secs.append(f'<section class="sec" id="dg-items"><h2 class="sec-h">要点<span class="n">{len(rest)}</span></h2>{rows}</section>')
+    if summary or keywords:
+        body = (f'<p class="dg-hl rv">{esc(summary)}</p>' if summary else "")
+        secs.append(f'<section class="sec" id="dg-summary">'
+                    f'<h2 class="sec-h">汇总</h2>{body}{_keyword_cloud(keywords)}</section>')
 
     for anchor, heading, side in (("dg-cats", "分类", news), ("dg-disc", "讨论", discussion)):
         block = _side_section(anchor, heading, side)
@@ -686,10 +676,8 @@ def render_digest_panel(digest: dict | None, categories: dict | None = None) -> 
         secs.append(f'<p class="dg-note">{"<br>".join(notes)}</p>')
 
     links: list[tuple] = []
-    if cards:
-        links.append(("dg-lead", "头条", None))
-    if rest:
-        links.append(("dg-items", "要点", len(rest)))
+    if summary or keywords:
+        links.append(("dg-summary", "汇总", len(keywords) or None))
     if news_cats:
         links.append(("dg-cats", "分类", news.get("classified"),
                       [(c.get("anchor"), c.get("name"), len(c.get("refs") or []))
@@ -877,9 +865,9 @@ def _tg_card(entry: dict, index: int, embed: bool, out_dir: Path) -> tuple[str, 
     srcs = ""
     if merged and extra.get("merged_sources"):
         srcs = '<div class="tg-src"><span>来源</span>' + "".join(
-            ext(m.get("url"), "@" + esc(m.get("channel") or "")) for m in extra["merged_sources"]) + "</div>"
+            ext(m.get("url"), esc(_channel_name(m))) for m in extra["merged_sources"]) + "</div>"
     card = (f'<article class="tg" id="{item_anchor(entry)}" data-ch="{esc(channel)}">'
-            f'<div class="tg-h">{ext("https://t.me/" + channel, "@" + esc(channel), "tg-ch")}{ai}'
+            f'<div class="tg-h">{ext("https://t.me/" + channel, esc(extra.get("channel_title") or ("@" + channel)), "tg-ch")}{ai}'
             f'<time>{esc(fmt_time(entry.get("published_at")))}</time></div>'
             f'{shots}{quote_html}{title}{body}{pill}{tags}{srcs}{cmp_btn}'
             f'<div class="tg-f">{views}{rx}{ext(entry.get("url"), "原帖" + ICON["out"], "go")}</div>'
@@ -892,27 +880,39 @@ def _channel_note(status: dict | None) -> str:
     report = ((status or {}).get("collector_report") or {}).get("channels") or {}
     failed = [c for c, r in report.items() if not r.get("ok")]
     empty = [c for c, r in report.items() if r.get("ok") and not r.get("kept")]
+
+    def label(channel: str) -> str:
+        return esc(report[channel].get("title") or ("@" + channel))
+
     rows = []
     if failed:
         rows.append('<p class="rail-note bad"><b>抓取失败</b>' + "".join(
-            f'<span title="{esc(report[c].get("error"))}">@{esc(c)}</span>' for c in failed) + "</p>")
+            f'<span title="{esc(report[c].get("error"))}">{label(c)}</span>' for c in failed) + "</p>")
     if empty:
         rows.append('<p class="rail-note"><b>当日无消息</b>' + "".join(
-            f'<span title="最新 {esc(report[c].get("newest_day") or "无")}">@{esc(c)}</span>' for c in empty) + "</p>")
+            f'<span title="最新 {esc(report[c].get("newest_day") or "无")}">{label(c)}</span>' for c in empty) + "</p>")
     return "".join(rows)
 
 
 def render_telegram_panel(items: list[dict], embed: bool, out_dir: Path, status: dict | None = None) -> str:
     cards, tpls = [], []
     counts: dict[str, int] = {}
+    # channel -> display name, so the filter rail reads "在花" rather than
+    # "@zaihuapd". The rail's data-filter value stays the raw id: filtering
+    # matches on the id, only the visible text changes.
+    titles: dict[str, str] = {}
     for index, entry in enumerate(items, 1):
         card, tpl = _tg_card(entry, index, embed, out_dir)
         cards.append(card)
         tpls.append(tpl)
-        ch = (entry.get("extra") or {}).get("channel") or ""
+        extra = entry.get("extra") or {}
+        ch = extra.get("channel") or ""
         counts[ch] = counts.get(ch, 0) + 1
+        if extra.get("channel_title"):
+            titles.setdefault(ch, extra["channel_title"])
     links = [("*", "全部频道", len(items))] + [
-        (ch, "@" + ch, n) for ch, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+        (ch, titles.get(ch) or ("@" + ch), n)
+        for ch, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
     ]
     grid = f'<div class="mas">{"".join(cards)}</div>{"".join(tpls)}'
     rail_html = rail(links, "filter", "频道")
@@ -1077,46 +1077,58 @@ def render_linuxdo_panel(items: list[dict]) -> str:
 # 少数派
 # --------------------------------------------------------------------------
 
-def render_sspai_panel(items: list[dict]) -> str:
+def render_sspai_panel(items: list[dict], status: dict | None = None) -> str:
     """Two sibling sections: 派早报 and 近期文章.
 
-    派早报 holds one or more issues; the news items of an issue are one level
-    below it (indented, on a rule), both on the page and in the rail.
+    派早报's stories were split out at collection time, so each one is its own
+    item carrying `issue_id` and `issue_index`. The panel regroups them by
+    issue, which keeps the page reading as "one issue, its stories" while the
+    classification and the citation chips see individual stories.
     """
-    features = [e for e in items if "派早报" in (e.get("title") or "") and (e.get("sections") or e.get("body_text"))]
-    others = [e for e in items if e not in features]
+    stories = [e for e in items if (e.get("extra") or {}).get("issue_id")]
+    others = [e for e in items if not (e.get("extra") or {}).get("issue_id")]
     secs, links = [], []
 
-    if features:
-        issues, children = [], []
-        for fi, e in enumerate(features, 1):
-            rich = _use_rich(e)
-            date, tm = stamp(e)
-            sections = [s for s in (e.get("sections") or []) if (s.get("text") or s.get("html"))]
-            head = (f'<header class="feat-h rv" id="{item_anchor(e)}"><h3>{ext(e.get("url"), esc(e.get("title")))}</h3>'
+    state = (status or {}).get("brief_state") or "unknown"
+    if stories:
+        issues: dict[str, list[dict]] = {}
+        for entry in stories:
+            issues.setdefault(entry["extra"]["issue_id"], []).append(entry)
+        children: list[tuple] = []
+        rendered = []
+        for issue_id, group in issues.items():
+            group.sort(key=lambda e: e["extra"].get("issue_index") or 0)
+            first = group[0]["extra"]
+            rich = _use_rich(group[0])
+            date, tm = stamp(group[0])
+            head = (f'<header class="feat-h rv"><h3>'
+                    f'{ext(first.get("issue_url"), esc(first.get("issue_title")))}</h3>'
                     f'<div class="ar-m"><span>{esc(date)} {esc(tm)}</span>'
-                    + (f'<span>{esc(e["author"])}</span>' if e.get("author") else "")
-                    + f'<span>{len(sections) or 1} 条</span></div></header>')
+                    + (f'<span>{esc(group[0]["author"])}</span>' if group[0].get("author") else "")
+                    + f'<span>{len(group)} 条</span></div></header>')
             blocks = []
-            for si, s in enumerate(sections, 1):
-                sid = f"sp-f{fi}-{si}"
-                title = s.get("title") or f"第 {si} 条"
-                blocks.append(f'<section class="sec blk rv" style="--i:{si}" id="{sid}">'
-                              f'<h4 class="blk-h"><span class="no">{si:02d}</span>{esc(title)}</h4>'
-                              f'<div class="prose">{body_fragment(s, rich)}</div></section>')
-                if len(features) == 1:
-                    children.append((sid, title, None))
-            if not sections:
-                blocks.append(f'<section class="blk"><div class="prose">{body_fragment(e, rich)}</div></section>')
-            if len(features) > 1:
-                children.append((f"sp-f{fi}", f"{date} {tm}".strip() or f"第 {fi} 期", len(sections) or None))
-            issues.append(f'<div class="sec feat-issue" id="sp-f{fi}">{head}'
-                          f'<div class="feat-items">{"".join(blocks)}</div></div>')
-        total = sum(len(e.get("sections") or []) or 1 for e in features)
-        aside = f'<span class="aside">{len(features)} 期</span>' if len(features) > 1 else ""
-        secs.append(f'<section class="sec" id="sp-brief"><h2 class="sec-h">派早报<span class="n">{total}</span>{aside}</h2>'
-                    f'{"".join(issues)}</section>')
-        links.append(("sp-brief", "派早报", total, children))
+            for entry in group:
+                index = entry["extra"].get("issue_index") or 0
+                blocks.append(
+                    f'<section class="sec blk rv" style="--i:{index}" id="{item_anchor(entry)}">'
+                    f'<h4 class="blk-h"><span class="no">{index:02d}</span>{esc(entry.get("title"))}</h4>'
+                    f'<div class="prose">{body_fragment(entry, rich)}</div></section>')
+                children.append((item_anchor(entry), entry.get("title"), None))
+            rendered.append(f'<div class="sec feat-issue">{head}'
+                            f'<div class="feat-items">{"".join(blocks)}</div></div>')
+        secs.append(f'<section class="sec" id="sp-brief">'
+                    f'<h2 class="sec-h">派早报<span class="n">{len(stories)}</span></h2>'
+                    f'{"".join(rendered)}</section>')
+        links.append(("sp-brief", "派早报", len(stories), children))
+    elif state in ("suspended", "pending"):
+        # No brief today. Saying which of the two it is matters: on a weekend
+        # there is none by design, on a weekday morning it simply is not out.
+        note = ("周末与法定假期不更新，下一期在下一个工作日 06:00–09:00 发布。"
+                if state == "suspended" else "今日尚未发布，通常在 06:00–09:00 之间。")
+        label = "今日停稿" if state == "suspended" else "尚未发布"
+        secs.append(f'<section class="sec" id="sp-brief">'
+                    f'<h2 class="sec-h">派早报<span class="aside">{label}</span></h2>'
+                    f'<p class="empty">{note}</p></section>')
 
     if others:
         secs.append(f'<section class="sec" id="sp-others"><h2 class="sec-h">近期文章<span class="n">{len(others)}</span></h2>'
@@ -1208,11 +1220,11 @@ def absent_panel(info: dict) -> str:
 
 
 def _digest_count(digest: dict | None, categories: dict | None) -> int:
-    """What the 今日汇总 tab counts: highlights when there are any, else the
+    """What the 今日汇总 tab counts: the keywords when there are any, else the
     number of categories the classification produced."""
-    cards = (digest or {}).get("cards") or []
-    if cards:
-        return len(cards)
+    keywords = (digest or {}).get("keywords") or []
+    if keywords:
+        return len(keywords)
     return sum(len((side or {}).get("categories") or [])
                for side in ((categories or {}).get("sides") or {}).values())
 
@@ -1244,7 +1256,8 @@ def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: b
                     + "</button>")
         panels.append(f'<section class="panel" role="tabpanel" id="p-{esc(key)}" aria-labelledby="t-{esc(key)}">{body}</section>')
 
-    if (digest and digest.get("cards")) or ai_stage.has_categories(categories):
+    if (digest and (digest.get("summary") or digest.get("keywords"))) \
+            or ai_stage.has_categories(categories):
         model = (digest or {}).get("model") or ""
         add("digest", "今日汇总", _digest_count(digest, categories), True,
             panel_head("今日汇总", "跨源合并与排序" + (f" · {model}" if model else ""), None)
@@ -1273,7 +1286,7 @@ def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: b
             sub = re.sub(r"\s*·\s*linux\.do 晚报\s*$", "", issue) or sub
             body = render_linuxdo_panel(items)
         elif name == "sspai":
-            body = render_sspai_panel(items)
+            body = render_sspai_panel(items, status)
         elif name == "hackernews":
             body = render_hn_board(items)
         elif name == "weibo":
@@ -1387,7 +1400,8 @@ def main() -> int:
     args.output.write_text(render(sources, digest, args.output, not args.no_embed, absent,
                                   categories), encoding="utf-8")
     size = args.output.stat().st_size / 1024
-    has_panel = bool(digest and digest.get("cards")) or ai_stage.has_categories(categories)
+    has_panel = bool(digest and (digest.get("summary") or digest.get("keywords"))) \
+        or ai_stage.has_categories(categories)
     print(f"{args.output}  ({size:.0f} KiB, {len(sources)} sources"
           + (f", {len(absent)} absent" if absent else "")
           + (", digest panel" if has_panel else "") + ")")

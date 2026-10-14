@@ -128,7 +128,7 @@ def summarise(snapshot: Path) -> dict:
             "merged_groups": (stage2.get("telegram") or {}).get("merged_groups"),
             "items_after": (stage2.get("telegram") or {}).get("items_after"),
         },
-        "highlights": len(digest.get("cards") or []),
+        "keywords": len(digest.get("keywords") or []),
         # From the stage 2 report in index.json, not from the processed files:
         # the categories live in processed/categories.json, and index.json is
         # the one file every snapshot is guaranteed to carry.
@@ -240,7 +240,7 @@ def main() -> int:
     print(f"\narchived {snapshot}  ({size / 1024 / 1024:.1f} MiB)", file=sys.stderr)
     print(f"  day {meta['day']} · engine {summary.get('engine')} · "
           f"ai {summary.get('ai_backend')} · {summary['item_count']} items · "
-          f"{summary['highlights']} highlights", file=sys.stderr)
+          f"{summary['keywords']} keywords", file=sys.stderr)
     print(f"  root digest kept at {digest_html}", file=sys.stderr)
     print(snapshot / "digest.html")
     return 0

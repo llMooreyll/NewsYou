@@ -33,6 +33,7 @@ Each item:
 | `url` | original link |
 | `channel` | Telegram channel, when applicable |
 | `section_name` | linux.do sub-section, when applicable |
+| `is_digest` | true when this item is one story from a 派早报 简讯 roundup |
 
 Two things about the input:
 
@@ -41,6 +42,19 @@ Two things about the input:
   must not mix them.
 - **No article bodies.** You see the headline and the excerpt, not the full
   text. Judge from what is here; do not assume what is not.
+
+## 派早报 items
+
+派早报 (少数派's daily brief) was split into one item per story before it
+reached you, so each item is a single piece of news with its own headline.
+Treat them as ordinary news items — they are not a bundle, and they do not all
+belong in one category just because they share a source.
+
+A few items carry `is_digest: true`: these come from the brief's 简讯 roundup,
+which is a list of short notices. Each one is **already one story** (the split
+happened upstream), so classify it on its own merits like anything else. Its
+`summary` may run longer than usual, and its `title` is the story's first
+sentence rather than an editor's headline — judge from the content.
 
 ## What the two sides are
 

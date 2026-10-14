@@ -460,24 +460,16 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
    digest
    ====================================================================== */
 .dg{max-width:900px}
-.dg-hl{padding:30px 0 28px;font-family:var(--serif);font-size:clamp(20px,2.3vw,27px);line-height:1.55;font-weight:600;
-  letter-spacing:.005em;color:var(--fg);border-bottom:1px solid var(--line)}
-.dg-lead{padding:30px 0;border-bottom:1px solid var(--line)}
-.dg-lead .no{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spacing:.14em}
-.dg-lead h2{margin-top:10px;font-family:var(--serif);font-size:24px;line-height:1.45;font-weight:700;letter-spacing:.005em}
-.dg-lead p{margin-top:12px;font-family:var(--serif);font-size:16.5px;line-height:1.9;letter-spacing:.015em;color:var(--fg-2);max-width:38em}
-.dg-it{display:grid;grid-template-columns:36px minmax(0,1fr) auto;column-gap:18px;padding:20px 0;
-  border-bottom:1px solid var(--line)}
-.dg-it .no{font-family:var(--mono);font-size:12px;color:var(--fg-4);padding-top:2px}
-.dg-it h3{font-family:var(--serif);font-size:17px;line-height:1.5;font-weight:700;letter-spacing:.005em}
-.dg-it p{margin-top:6px;font-size:13.5px;line-height:1.75;color:var(--fg-3);max-width:68ch;
-  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.dg-it .sc{font-family:var(--mono);font-size:11px;color:var(--fg-4);padding-top:3px}
-.dg-m{margin-top:10px;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;
-  font-family:var(--mono);font-size:11px;color:var(--fg-4)}
-.dg-m .tp-c{color:var(--fg-3)}
-.dg-m a{color:var(--fg-3);transition:color var(--t-fast)}
-.dg-m a:hover{color:var(--accent-2)}
+.dg-hl{padding:30px 0 22px;font-family:var(--serif);font-size:clamp(20px,2.3vw,27px);line-height:1.55;font-weight:600;
+  letter-spacing:.005em;color:var(--fg)}
+/* Keyword cloud. --w is the model's 0-100 weight, so the size ordering is the
+   model's judgement rather than a class ladder. The clamp keeps the extremes
+   readable without capping the spread. */
+.dg-kw{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:baseline;
+  padding-bottom:26px;border-bottom:1px solid var(--line)}
+.dg-kw span{font-family:var(--serif);font-weight:600;letter-spacing:.01em;
+  font-size:clamp(11px,calc(11px + var(--w,50) * 0.06px),17px);
+  color:color-mix(in srgb,var(--fg) calc(40% + var(--w,50) * 0.6%),var(--bg))}
 .dg-note{margin-top:28px;font-family:var(--mono);font-size:11px;line-height:1.8;color:var(--fg-4)}
 
 /* ---------- categories: 分类 and 讨论 blocks ---------- */
@@ -713,8 +705,7 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
   .b-wb .br-bar,.b-wb .bd-legend .h-bar{display:none}
   .b-zh .br,.b-zh .bd-legend{grid-template-columns:22px minmax(0,1fr) 56px}
   .b-zh .br-bar,.b-zh .bd-legend .h-bar{display:none}
-  .dg-it{grid-template-columns:28px minmax(0,1fr)}
-  .dg-it .sc{display:none}
+  .dg-kw{gap:6px 14px}
   .ov{padding:12px}
   .ov-p.covered{transform:translate(-8px,-12px) scale(.96)}
   .ov-p.child.on{transform:translate(4px,8px)}

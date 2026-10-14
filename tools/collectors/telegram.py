@@ -66,6 +66,11 @@ MESSAGE_SPLIT = re.compile(r'(?=<div class="tgme_widget_message\b)')
 POST_ID = re.compile(r'data-post="([^"]+)"')
 DATE = re.compile(r'<time[^>]+datetime="([^"]+)"')
 VIEWS = re.compile(r'tgme_widget_message_views">([^<]+)<')
+# The channel's own display name, from the page header. Free to read: the page
+# is already downloaded, so showing "在花" instead of "@zaihuapd" costs no
+# request. The optional <span> is how t.me wraps some titles.
+CHANNEL_TITLE = re.compile(
+    r'<div class="tgme_channel_info_header_title"[^>]*>(?:<span[^>]*>)?([^<]+)')
 AUTHOR = re.compile(r'tgme_widget_message_author[^>]*>(.*?)</a>', re.S)
 TEXT_DIV = re.compile(
     r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>\s*'
@@ -207,6 +212,16 @@ def parse_reactions(block: str) -> list[dict]:
         reactions.append({"emoji": emoji.strip(), "count": value})
     return reactions
 
+def channel_title(page_html: str) -> str:
+    """The channel's display name as t.me shows it, or '' when absent.
+
+    Some channels are named in English ("Reorx's Forge") and some mix scripts
+    ("douView × 银幕"); whatever the page says is what gets shown, so a channel
+    that renames itself is picked up with no configuration change.
+    """
+    match = CHANNEL_TITLE.search(page_html or "")
+    return strip_tags(match.group(1)).strip() if match else ""
+
 def parse_posts(page_html: str) -> list[dict]:
     """Parse any t.me/s/<channel> page into structured posts (channel-agnostic)."""
     posts: list[dict] = []
@@ -311,6 +326,11 @@ def walk_channel(channel: str, pages: int, before: int | None,
                     "It may be private, renamed, or hidden from t.me/s.")
             break
 
+        if page_index == 0:
+            # The header carries the display name. Cached rather than returned
+            # so walk_channel keeps its signature; collect() reads it back.
+            CHANNEL_TITLES[channel] = channel_title(page_html)
+
         posts = parse_posts(page_html)
         if not posts:
             break
@@ -402,6 +422,10 @@ def resolve_day(day: str, reference=None) -> str | None:
 # source status so a failing or empty channel is visible, not just a log line.
 _LAST_REPORT: dict = {}
 
+# channel -> display name, filled by walk_channel from the page it already
+# downloaded. Module level so collect() can read it without a signature change.
+CHANNEL_TITLES: dict[str, str] = {}
+
 def last_report() -> dict:
     return dict(_LAST_REPORT)
 
@@ -426,7 +450,8 @@ def collect(limit: int = 400, day: str = "auto", pages: int = 4,
             walked[channel] = walk_channel(channel, pages, None)
         except PreviewError as exc:
             print(f"  ! telegram {channel} failed: {exc}", file=sys.stderr)
-            report[channel] = {"ok": False, "error": str(exc), "fetched": 0, "kept": 0}
+            report[channel] = {"ok": False, "error": str(exc), "fetched": 0, "kept": 0,
+                               "title": CHANNEL_TITLES.get(channel) or ""}
 
     day_counts: dict[str, dict[str, int]] = {}
     for channel, posts in walked.items():
@@ -456,6 +481,7 @@ def collect(limit: int = 400, day: str = "auto", pages: int = 4,
                 extra={
                     "collector": "public_preview",
                     "channel": channel,
+                    "channel_title": CHANNEL_TITLES.get(channel) or "",
                     "message_id": post.get("message_id"),
                     "views": post.get("views_text"),
                     "media": post.get("media") or [],
@@ -469,7 +495,8 @@ def collect(limit: int = 400, day: str = "auto", pages: int = 4,
             ))
         newest = max(day_counts.get(channel) or {"": 0})
         report[channel] = {"ok": True, "fetched": len(posts), "kept": kept,
-                           "newest_day": newest or None}
+                           "newest_day": newest or None,
+                           "title": CHANNEL_TITLES.get(channel) or ""}
         if kept == 0:
             print(f"  telegram {channel}: no posts on {chosen} (newest {newest or 'none'})",
                   file=sys.stderr)

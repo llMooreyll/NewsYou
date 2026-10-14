@@ -169,9 +169,9 @@ def remove_leftovers(outdir: Path, written: set[str]) -> list[str]:
     copies it whole, so a file left from another day is as good as current: a
     source that dropped out today would keep its old panel, and a day without
     decisions would keep the last briefing. Only this stage's own output is
-    removed — a source file names itself in `source`, the panels carry `cards`
-    or `sides` — so pointing --out at a shared directory cannot cost anything
-    else.
+    removed — a source file names itself in `source`, the panels carry
+    `summary` or `sides` — so pointing --out at a shared directory cannot cost
+    anything else.
     """
     removed: list[str] = []
     for path in sorted(outdir.glob("*.json")):
@@ -180,7 +180,7 @@ def remove_leftovers(outdir: Path, written: set[str]) -> list[str]:
         payload = load_json(path)
         if not isinstance(payload, dict):
             continue
-        is_panel = path.name == "digest.json" and "cards" in payload
+        is_panel = path.name == "digest.json" and "summary" in payload
         is_categories = path.name == "categories.json" and "sides" in payload
         is_source = payload.get("source") == path.stem and "items" in payload
         if is_panel or is_categories or is_source:
@@ -456,15 +456,16 @@ def main() -> int:
         report["digest"] = {
             "decisions_file": str(digest_decisions_path),
             "model": digest.get("model"),
-            "highlights": len(panel["cards"]),
-            "resolved_aliases": sum(
-                1 for card in panel["cards"] for ref in card["refs"]
-                if ref["id"] in aliases
-            ),
+            "keywords": len(panel["keywords"]),
+            # Audit, not validation: it says how many of the items the summary
+            # claims to draw on actually exist, not whether it used them well.
+            "audited": len(panel["sources"]),
+            "audit_requested": len(digest.get("source_ids") or []),
             "rejected": len(problems),
             "problems": problems,
         }
-        print(f"digest: {len(panel['cards'])} highlights, "
+        print(f"digest: {len(panel['keywords'])} keywords, "
+              f"{len(panel['sources'])}/{len(digest.get('source_ids') or [])} audit ids resolved, "
               f"{len(problems)} rejected", file=sys.stderr)
         for problem in problems[:10]:
             print(f"  ! {problem}", file=sys.stderr)

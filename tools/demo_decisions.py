@@ -6,9 +6,10 @@ repository ships a working example of both decision formats, and so the digest
 shows what stage 2 produces without anyone needing to call a model first.
 
 The selection is **derived from the data**, not from hardcoded keywords: a
-hardcoded list silently degrades to "0 highlights" the moment the day's messages
-change. Merges come from cross-channel keyword overlap, highlights from a simple
-interest score, and categories from the sources the items came from.
+hardcoded list silently degrades to "0 keywords" the moment the day's messages
+change. Merges come from cross-channel keyword overlap, keywords from word
+frequency, the summary from the busiest sources, and categories from the sources
+the items came from.
 
 Real usage replaces these with actual model output.
 
@@ -95,49 +96,42 @@ def build_merges(entries: list[dict], id_of) -> list[dict]:
             break
     return actions
 
-def build_highlights(entries: list[dict], id_of, merges: list[dict]) -> list[dict]:
-    """Rank messages by a simple interest score, capped per channel."""
-    merged_ids = {a["primary_id"] for a in merges} | {m for a in merges for m in a["merge_ids"]}
-    pool = [e for e in entries if id_of(e) not in merged_ids]
+def build_keywords(entries: list[dict], id_of, merges: list[dict]) -> list[dict]:
+    """Weighted keywords from keyword frequency across the day.
 
-    scored = []
-    for entry in pool:
-        text = entry["extra"].get("text") or ""
-        score = min(len(text), 600) / 10.0
-        if entry["extra"].get("views"):
-            try:
-                score += min(int(str(entry["extra"]["views"]).replace(",", "")), 20000) / 400.0
-            except ValueError:
-                pass
-        if entry["extra"].get("photos"):
-            score += 2
-        scored.append((score, entry))
-    scored.sort(key=lambda x: -x[0])
+    A stand-in for the model's judgement, built the same way the model is asked
+    to build it: a word many messages share is a subject of the day, and its
+    weight follows how many carry it. Ties keep a spread rather than collapsing
+    to one size, which is what the display relies on.
+    """
+    counts: dict[str, int] = {}
+    for entry in entries:
+        text = (entry.get("extra") or {}).get("text") or entry.get("title") or ""
+        for word in keywords(text):
+            counts[word] = counts.get(word, 0) + 1
+    if not counts:
+        return []
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:12]
+    top = ranked[0][1] or 1
+    return [{"text": word, "weight": max(10, min(95, int(10 + 85 * n / top)))}
+            for word, n in ranked]
 
-    per_channel: dict[str, int] = {}
-    picked = []
-    for score, entry in scored:
-        channel = entry["extra"].get("channel") or "?"
-        if per_channel.get(channel, 0) >= 2:
-            continue
-        per_channel[channel] = per_channel.get(channel, 0) + 1
-        picked.append((score, entry))
-        if len(picked) >= 6:
-            break
+def build_summary(entries: list[dict], id_of, merges: list[dict],
+                  channels: list[str]) -> tuple[str, list[str]]:
+    """A stand-in for the model's prose, plus the ids it would have cited.
 
-    highlights = []
-    for rank, (score, entry) in enumerate(picked, 1):
-        text = re.sub(r"\s+", " ", entry["extra"].get("text") or "").strip()
-        highlights.append({
-            "item_ids": [id_of(entry)],
-            "rank": rank,
-            "title": (text.splitlines() or [entry["title"]])[0][:80],
-            "summary": text[:220],
-            "topics": ["other"],
-            "importance": max(40, min(95, int(score) + 45)),
-            "why": f"单源，热度与篇幅综合排序（{len(text)} 字）",
-        })
-    return highlights
+    Derived from the data like everything else here: the sources that carried
+    the most, named as a sentence. Real usage replaces this.
+    """
+    if not entries:
+        return "当日无内容。", []
+    scored = sorted(entries, key=lambda e: -(len((e.get("extra") or {}).get("text") or "")))
+    cited = [id_of(e) for e in scored[:12]]
+    busiest = sorted({e.get("source") for e in entries if e.get("source")})[:5]
+    return (f"当日共 {len(entries)} 条，来自 {len(busiest)} 个来源"
+            f"（{('、'.join(busiest))}）；"
+            f"{len(channels)} 个 Telegram 频道有更新，{len(merges)} 组跨频道重复已合并。"
+            f"本条为演示文案，用于替代模型输出。"), cited
 
 def load_items(collected: Path) -> dict[str, list[dict]]:
     """Every collected source, not just Telegram: the classification covers the
@@ -201,9 +195,11 @@ def main() -> int:
         return ai_stage.item_id(entry)
 
     merges = build_merges(entries, id_of)
-    highlights = build_highlights(entries, id_of, merges)
     # a merge member is not a top-level item any more, so no category may name it
     absorbed = {m for action in merges for m in action["merge_ids"]}
+    channels = sorted({e["extra"].get("channel") for e in entries if e["extra"].get("channel")})
+    keywords = build_keywords(entries, id_of, merges)
+    summary, cited = build_summary(entries, id_of, merges, channels)
     aidir.mkdir(parents=True, exist_ok=True)
 
     for side, stem in ai_stage.CLASSIFY_SIDES:
@@ -224,19 +220,19 @@ def main() -> int:
         "actions": merges,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    channels = sorted({e["extra"].get("channel") for e in entries if e["extra"].get("channel")})
     (aidir / "digest_decisions.json").write_text(json.dumps({
         "schema": ai_stage.DIGEST_SCHEMA,
         "day": day,
         "model": MODEL_NOTE,
-        "headline": (highlights[0]["title"][:60] + "…") if highlights else "当日无显著要闻。",
-        "highlights": highlights,
+        "summary": summary,
+        "keywords": keywords,
+        "source_ids": cited,
         "stats_note": (f"{len(channels)} 个频道当日共 {len(entries)} 条消息，"
                        f"其中 {len(merges)} 组为跨频道重复并已合并。引擎：{engine}。"),
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     print(f"wrote {aidir}/telegram_decisions.json ({len(merges)} actions)")
-    print(f"wrote {aidir}/digest_decisions.json ({len(highlights)} highlights)")
+    print(f"wrote {aidir}/digest_decisions.json ({len(keywords)} keywords, {len(cited)} audit ids)")
     return 0
 
 if __name__ == "__main__":

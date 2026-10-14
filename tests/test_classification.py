@@ -287,8 +287,9 @@ class AnchorConsistency(unittest.TestCase):
                 "title": entry["title"], "url": entry["url"]}
 
     def briefing(self):
-        return {"cards": [{"rank": 1, "title": "头条", "summary": "摘要", "importance": 90,
-                           "refs": [self.ref(self.items[0])]}]}
+        return {"summary": "今天的整体面貌。",
+                "keywords": [{"text": "主题", "weight": 90}],
+                "sources": [self.ref(self.items[0])]}
 
     def categories(self):
         return {"sides": {"news": {"nature": "news", "item_count": len(self.items),
@@ -348,9 +349,9 @@ class DigestPanelWithoutBriefing(unittest.TestCase):
         self.assertNotIn('data-tab="digest"', html)
 
     def test_an_empty_digest_does_not_break_the_categories(self):
-        html = self.render({"cards": []}, self.categories())
+        html = self.render({}, self.categories())
         self.assertIn('id="cat-1"', html)
-        self.assertNotIn('id="dg-lead"', html)
+        self.assertNotIn('id="dg-summary"', html)
 
 # --------------------------------------------------------------------------
 # configuration

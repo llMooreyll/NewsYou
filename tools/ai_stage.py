@@ -46,7 +46,8 @@ SPAM_CATEGORIES = ("ad", "promo", "giveaway", "crosspromo", "affiliate",
                    "crypto", "other")
 
 TELEGRAM_SCHEMA = "newsletter.telegram-decisions/1"
-DIGEST_SCHEMA = "newsletter.digest-decisions/1"
+DIGEST_SCHEMA = "newsletter.digest-decisions/2"
+DIGEST_SCHEMA_V1 = "newsletter.digest-decisions/1"
 TELEGRAM_INPUT_SCHEMA = "newsletter.telegram-input/1"
 DIGEST_INPUT_SCHEMA = "newsletter.digest-input/1"
 CLASSIFY_SCHEMA = "newsletter.classify-decisions/1"
@@ -68,6 +69,15 @@ CATEGORY_FALLBACK = "其他"
 CATEGORY_NAME_LIMIT = 40
 CATEGORY_SUMMARY_LIMIT = 60
 CLASSIFY_SUMMARY_LIMIT = 400
+# The 简讯 roundup is one item holding several stories, so its summary has to
+# carry all of them: at the normal limit only the first third would be visible
+# to the classifier, which defeats the point of sending it whole.
+DIGEST_ITEM_SUMMARY_LIMIT = 1600
+
+# Stage 2b: one summary of the whole day plus weighted keywords.
+DIGEST_SUMMARY_LIMIT = 800
+KEYWORD_LIMIT = 20
+KEYWORD_TEXT_LIMIT = 24
 
 
 def load_prompt(name: str) -> str:
@@ -198,6 +208,7 @@ def slim_item(entry: dict) -> dict:
         "content_hash": entry.get("content_hash"),
         "is_today": bool(entry.get("is_today")),
         "channel": extra.get("channel"),
+        "channel_title": extra.get("channel_title"),
         "section_name": extra.get("section_name"),
     }
 
@@ -255,17 +266,17 @@ def build_digest_input(results: dict[str, list[dict]], statuses: dict[str, dict]
         "generated_at": datetime.now().astimezone().isoformat(),
         "day": day,
         "item_count": total,
-        "instructions": load_prompt("digest_highlights"),
+        "instructions": load_prompt("digest_summary"),
         "response_schema": {
             "schema": DIGEST_SCHEMA,
             "day": day,
             "model": "string",
-            "headline": "string",
-            "highlights": [{
-                "item_ids": ["string"], "rank": "number", "title": "string",
-                "summary": "string", "topics": ["string"], "importance": "number 0-100",
-                "why": "string",
+            "summary": "string: 一段覆盖当天整体面貌的长句，可多句，不逐条罗列",
+            "keywords": [{
+                "text": "string: 关键字或短语",
+                "weight": "number 0-100: 该词对理解今天的重要程度，决定显示字号",
             }],
+            "source_ids": ["string: 撰写 summary 时依据的 item id，仅用于审计"],
             "stats_note": "string",
         },
         "sources": sources,
@@ -291,6 +302,16 @@ def classify_groups(results: dict[str, list[dict]]) -> dict[str, list[dict]]:
                 groups[nature].append(entry)
     return groups
 
+def _classify_summary_limit(entry: dict) -> int:
+    """How much of an item's summary stage 2c/2d gets to see.
+
+    The 简讯 roundup is one item containing several stories, so the normal
+    limit would hide most of them from the classifier.
+    """
+    if (entry.get("extra") or {}).get("is_digest"):
+        return DIGEST_ITEM_SUMMARY_LIMIT
+    return CLASSIFY_SUMMARY_LIMIT
+
 def slim_classify_item(entry: dict) -> dict:
     """The projection for stage 2c/2d.
 
@@ -305,7 +326,7 @@ def slim_classify_item(entry: dict) -> dict:
         "source": entry.get("source"),
         "source_name": entry.get("source_name"),
         "title": entry.get("title"),
-        "summary": (entry.get("summary") or "")[:CLASSIFY_SUMMARY_LIMIT],
+        "summary": (entry.get("summary") or "")[:_classify_summary_limit(entry)],
         "url": entry.get("url"),
         "channel": extra.get("channel"),
         "section_name": extra.get("section_name"),
@@ -481,73 +502,84 @@ def validate_digest_decisions(decisions: dict, known_ids: set[str],
 
     `aliases` maps ids that were absorbed by a merge onto their merge primary,
     so a reference to a merged-away message resolves instead of being dropped.
+
+    There is less to check here than there used to be. The old briefing was a
+    list of ranked highlights, each anchored to item ids, so every claim could
+    be traced. The day summary is free text and cannot be: `source_ids` is
+    checked for existence, which catches a fabricated reference but says
+    nothing about whether the sentence is supported by the items it names.
     """
     aliases = aliases or {}
     problems: list[str] = []
     if not isinstance(decisions, dict):
         return {}, ["decisions file is not a JSON object"]
+    if decisions.get("schema") == DIGEST_SCHEMA_V1:
+        problems.append(
+            "decisions file uses the old schema (highlight list); regenerate it")
+        return {}, problems
     if decisions.get("schema") not in (None, DIGEST_SCHEMA):
         problems.append(f"unexpected schema {decisions.get('schema')!r}")
 
-    def resolve(ref: str) -> str | None:
-        if ref in known_ids:
-            return ref
-        if ref in aliases:
-            return aliases[ref]
-        return None
+    summary = _clean_text(decisions.get("summary"), DIGEST_SUMMARY_LIMIT + 1,
+                          keep_paragraphs=True)
+    if len(summary) > DIGEST_SUMMARY_LIMIT:
+        problems.append(f"summary trimmed to {DIGEST_SUMMARY_LIMIT} characters")
+        summary = summary[:DIGEST_SUMMARY_LIMIT]
 
-    highlights: list[dict] = []
-    for index, item in enumerate(decisions.get("highlights") or []):
-        if not isinstance(item, dict):
-            problems.append(f"highlight {index}: not an object")
+    keywords: list[dict] = []
+    seen_words: set[str] = set()
+    for index, word in enumerate(decisions.get("keywords") or []):
+        if isinstance(word, str):                     # a bare string is accepted
+            text, weight = word, 50
+        elif isinstance(word, dict):
+            text, weight = word.get("text"), word.get("weight")
+        else:
+            problems.append(f"keyword {index}: not an object or string")
             continue
-        raw_ids = [i for i in (item.get("item_ids") or []) if isinstance(i, str)]
-        valid: list[str] = []
-        for ref in raw_ids:
-            target = resolve(ref)
-            if target is None:
-                problems.append(f"highlight {index}: unknown id {ref!r}")
-                continue
-            if target not in valid:
-                valid.append(target)
-        if not valid:
-            problems.append(f"highlight {index}: no valid item_ids, skipped")
+        text = _clean_text(text, KEYWORD_TEXT_LIMIT + 1)
+        if not text:
+            problems.append(f"keyword {index}: missing text, skipped")
             continue
-        title = _clean_text(item.get("title"), 300)
-        summary = _clean_text(item.get("summary"), 2000, keep_paragraphs=True)
-        if not title:
-            problems.append(f"highlight {index}: missing title, skipped")
+        if len(text) > KEYWORD_TEXT_LIMIT:
+            text = text[:KEYWORD_TEXT_LIMIT]
+        if text in seen_words:
+            problems.append(f"keyword {index}: {text!r} repeated, skipped")
             continue
         try:
-            importance = int(item.get("importance") or 0)
+            weight = int(weight)
         except (TypeError, ValueError):
-            importance = 0
-        highlights.append({
-            "item_ids": valid,
-            "rank": index + 1,
-            "title": title,
-            "summary": summary,
-            "topics": [t for t in (item.get("topics") or []) if t in TOPICS],
-            "importance": max(0, min(100, importance)),
-            "why": _clean_text(item.get("why"), 200),
-        })
+            weight = 50
+        seen_words.add(text)
+        keywords.append({"text": text, "weight": max(0, min(100, weight))})
+    keywords.sort(key=lambda k: k["weight"], reverse=True)
+    if len(keywords) > KEYWORD_LIMIT:
+        problems.append(f"keywords trimmed from {len(keywords)} to {KEYWORD_LIMIT}")
+        keywords = keywords[:KEYWORD_LIMIT]
 
-    highlights.sort(key=lambda h: h["importance"], reverse=True)
-    for position, item in enumerate(highlights, 1):
-        item["rank"] = position
-    if len(highlights) > 10:
-        problems.append(f"highlights trimmed from {len(highlights)} to 10")
-        highlights = highlights[:10]
+    # Audit only: these ids are not rendered, they exist so a reference to an
+    # item that never existed can be told apart from a claim that is merely
+    # unsupported.
+    source_ids: list[str] = []
+    for ref in decisions.get("source_ids") or []:
+        if not isinstance(ref, str):
+            problems.append(f"source_ids: {ref!r} is not a string")
+            continue
+        target = ref if ref in known_ids else aliases.get(ref)
+        if target is None:
+            problems.append(f"source_ids: unknown id {ref!r}")
+            continue
+        if target not in source_ids:
+            source_ids.append(target)
 
     return {
         "schema": DIGEST_SCHEMA,
         "day": decisions.get("day"),
         "model": _clean_text(decisions.get("model"), 120),
-        "headline": _clean_text(decisions.get("headline"), 400),
-        "highlights": highlights,
+        "summary": summary,
+        "keywords": keywords,
+        "source_ids": source_ids,
         "stats_note": _clean_text(decisions.get("stats_note"), 300),
     }, problems
-
 
 # --------------------------------------------------------------------------
 # Apply
@@ -605,6 +637,7 @@ def apply_telegram_decisions(items: list[dict], actions: list[dict]) -> tuple[li
                 originals.append({
                     "id": member_id,
                     "channel": extra.get("channel"),
+                    "channel_title": extra.get("channel_title"),
                     "source_name": source.get("source_name"),
                     "title": source.get("title"),
                     "text": extra.get("text") or source.get("summary") or "",
@@ -633,7 +666,9 @@ def apply_telegram_decisions(items: list[dict], actions: list[dict]) -> tuple[li
             extra["local_images"] = _union(o["local_images"] for o in originals)
             extra["photos"] = _union(o["photos"] for o in originals)
             extra["media"] = _union(o["media"] for o in originals)
-            extra["merged_sources"] = [{"channel": o["channel"], "url": o["url"]} for o in originals]
+            extra["merged_sources"] = [{"channel": o["channel"],
+                                       "channel_title": o.get("channel_title"),
+                                       "url": o["url"]} for o in originals]
             merged["extra"] = extra
             if action.get("topics"):
                 merged["tags"] = action["topics"]
@@ -667,34 +702,36 @@ def apply_telegram_decisions(items: list[dict], actions: list[dict]) -> tuple[li
 
 
 def apply_digest_decisions(digest: dict, item_index: dict[str, dict]) -> dict:
-    """Resolve every referenced id into a render-ready card. No deletion."""
-    cards = []
-    for highlight in digest.get("highlights") or []:
-        refs = []
-        for ref in highlight["item_ids"]:
-            entry = item_index.get(ref)
-            if not entry:
-                continue
-            extra = entry.get("extra") or {}
-            refs.append({
-                "id": ref,
-                "source": entry.get("source"),
-                "source_name": entry.get("source_name"),
-                "channel": extra.get("channel"),
-                "title": entry.get("title"),
-                "url": entry.get("url"),
-                "published_at": entry.get("published_at"),
-                "ai_merged": bool(entry.get("ai_merged")),
-            })
-        cards.append({**highlight, "refs": refs})
+    """Resolve the audit ids into a render-ready form. No deletion.
+
+    Much smaller than it was: the briefing no longer names items, so there are
+    no cards to build. What is left is resolving `source_ids` to titles so the
+    report can say what the summary was written from.
+    """
+    audited = []
+    for ref in digest.get("source_ids") or []:
+        entry = item_index.get(ref)
+        if not entry:
+            continue
+        extra = entry.get("extra") or {}
+        audited.append({
+            "id": ref,
+            "source": entry.get("source"),
+            "source_name": entry.get("source_name"),
+            "channel": extra.get("channel"),
+            "channel_title": extra.get("channel_title"),
+            "title": entry.get("title"),
+            "url": entry.get("url"),
+        })
 
     return {
         "schema": digest.get("schema"),
         "day": digest.get("day"),
         "model": digest.get("model"),
-        "headline": digest.get("headline"),
+        "summary": digest.get("summary"),
+        "keywords": digest.get("keywords") or [],
+        "sources": audited,
         "stats_note": digest.get("stats_note"),
-        "cards": cards,
     }
 
 # --------------------------------------------------------------------------
@@ -821,6 +858,7 @@ def apply_classify_decisions(categories: list[dict], item_index: dict[str, dict]
                 "source": entry.get("source"),
                 "source_name": entry.get("source_name"),
                 "channel": extra.get("channel"),
+                "channel_title": extra.get("channel_title"),
                 "title": entry.get("title"),
                 "url": entry.get("url"),
             })

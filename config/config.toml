@@ -100,15 +100,24 @@ zhihu = 15
 #   discussion  sharing and community threads -> stage 2d, the 讨论 block
 #   longform    irregularly updated long reads -> no category at all, its own
 #               panel only (a weekly newsletter is not a day's news)
+#
+# NOTE: each list *replaces* the built-in default rather than adding to it, so
+# naming one source means naming all of them. Leaving a source out silently
+# puts it back in the news side.
 [sources.nature]
 discussion = ["linuxdo", "hackernews"]
-longform = ["ruanyifeng", "anywayfm"]
+longform = ["sspai", "latepost", "geekpark", "ruanyifeng", "anywayfm"]
 
 # Per-unit overrides for the sources that carry more than one nature.
-# Key is "<source>:<unit>", where the unit is a Telegram channel or a linux.do
-# section name. A unit not listed here follows its source, so only the
-# exceptions appear below.
+# Key is "<source>:<unit>", where the unit is a Telegram channel, a linux.do
+# section name, or — for sspai — 派早报, which the collector sets on each story
+# it splits out of the daily brief. A unit not listed here follows its source,
+# so only the exceptions appear below.
 [sources.units]
+# sspai is long-form, except the brief: its stories are a day's news and are
+# the only part of that source that reaches classification.
+"sspai:派早报" = "news"
+
 "telegram:reorx_share" = "discussion"
 "telegram:notonlyshare" = "discussion"
 "telegram:bigwalnut" = "discussion"

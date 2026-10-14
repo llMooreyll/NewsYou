@@ -184,13 +184,15 @@ class ItemIds(unittest.TestCase):
         self.assertEqual(ai_stage.item_id(a), ai_stage.item_id(b))
 
     def test_old_ids_still_resolve(self):
+        """An alias resolves through the audit list, which is the only place an
+        id is still checked now that the briefing is prose."""
         entry = _item("zhihu", "问题", "https://www.zhihu.com/question/1")
         index, aliases = ai_stage.build_item_index({"zhihu": [entry]})
         old = ai_stage.legacy_item_id(entry)
         digest, problems = ai_stage.validate_digest_decisions(
-            {"highlights": [{"item_ids": [old], "title": "t", "summary": "s"}]}, set(index), aliases)
+            {"summary": "s", "source_ids": [old]}, set(index), aliases)
         self.assertEqual(problems, [])
-        self.assertEqual(digest["highlights"][0]["item_ids"], [ai_stage.item_id(entry)])
+        self.assertEqual(digest["source_ids"], [ai_stage.item_id(entry)])
 
 
 class TelegramMerge(unittest.TestCase):
@@ -268,9 +270,9 @@ class StageTwoRun(unittest.TestCase):
 
     def decide(self, day: str) -> None:
         self.write(self.ai / "digest_decisions.json", {
-            "schema": ai_stage.DIGEST_SCHEMA, "day": day, "headline": f"headline of {day}",
-            "highlights": [{"item_ids": [ai_stage.item_id(self.story)], "title": "T",
-                            "summary": "S", "importance": 90}]})
+            "schema": ai_stage.DIGEST_SCHEMA, "day": day, "summary": f"summary of {day}",
+            "keywords": [{"text": "主题", "weight": 90}],
+            "source_ids": [ai_stage.item_id(self.story)]})
 
     def run_stage(self, backend: str = "none") -> str:
         argv = ["ai_apply.py", "--collected", str(self.collected), "--ai", str(self.ai),
@@ -287,7 +289,7 @@ class StageTwoRun(unittest.TestCase):
     def test_decisions_for_this_day_are_applied(self):
         self.decide(DAY)
         self.run_stage()
-        self.assertEqual(self.panel()["headline"], f"headline of {DAY}")
+        self.assertEqual(self.panel()["summary"], f"summary of {DAY}")
 
     def test_decisions_from_another_day_are_not_applied(self):
         self.decide(DAY_BEFORE)
@@ -304,12 +306,12 @@ class StageTwoRun(unittest.TestCase):
         self.assertIsNone(self.panel())
 
     def test_a_fresh_answer_is_applied_whatever_day_the_model_claims(self):
-        answer = json.dumps({"day": DAY_BEFORE, "headline": "fresh", "highlights": [
-            {"item_ids": [ai_stage.item_id(self.story)], "title": "T", "summary": "S"}]})
+        answer = json.dumps({"day": DAY_BEFORE, "summary": "fresh",
+                             "source_ids": [ai_stage.item_id(self.story)]})
         with mock.patch.object(ai_model.shutil, "which", return_value="/fake/pi"), \
              mock.patch.object(ai_model, "_invoke", return_value=answer):
             self.run_stage(backend="pi")
-        self.assertEqual(self.panel()["headline"], "fresh")
+        self.assertEqual(self.panel()["summary"], "fresh")
         self.assertEqual(self.panel()["day"], DAY)
 
     def test_a_source_file_from_an_earlier_day_is_skipped(self):
@@ -326,7 +328,7 @@ class StageTwoRun(unittest.TestCase):
 
     def test_output_of_an_earlier_run_is_removed(self):
         self.write(self.out / "weibo.json", {"source": "weibo", "items": []})
-        self.write(self.out / "digest.json", {"cards": [{"title": "old"}]})
+        self.write(self.out / "digest.json", {"summary": "old"})
         self.write(self.out / "notes.json", {"mine": True})
         self.run_stage()
         self.assertEqual(sorted(p.name for p in self.out.glob("*.json")),
