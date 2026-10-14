@@ -38,18 +38,30 @@ def feed_items(feed_url: str, source: str, source_name: str, *, engine: str,
 
 def fetch_bodies(items: list[dict], *, engine: str, fulltext, today=None,
                  legacy_marker: str | None = None, sleep: float = 0.4,
-                 include_images: bool = False) -> None:
-    """Fetch and attach article bodies for the items the policy selects."""
-    for entry in base.fulltext_targets(items, fulltext, today):
-        scope = base.fulltext_scope_label(entry)
+                 include_images: bool = False,
+                 workers: int = base.DEFAULT_WORKERS) -> None:
+    """Fetch and attach article bodies for the items the policy selects.
+
+    Bodies are independent per item, so they are fetched concurrently and
+    written back in order. `sleep` still applies, inside each worker, so a
+    source is not hammered any harder than it was when this was serial — the
+    pause is now overlapped with other fetches instead of adding up.
+    """
+    targets = list(base.fulltext_targets(items, fulltext, today))
+
+    def body_for(entry: dict) -> dict | None:
         try:
             html = base.fetch(entry["url"])
         except FetchError as exc:
             print(f"  ! body failed {entry['url']}: {exc}", file=sys.stderr)
-            continue
-        body = ex.extract_article(html, entry["url"], engine,
+            return None
+        if sleep:
+            time.sleep(sleep)
+        return ex.extract_article(html, entry["url"], engine,
                                   legacy_marker=legacy_marker,
                                   include_images=include_images)
+
+    for entry, body in zip(targets, base.parallel_map(body_for, targets, workers)):
         if body:
-            base.write_body(entry, body, engine=engine, scope=scope)
-        time.sleep(sleep)
+            base.write_body(entry, body, engine=engine,
+                            scope=base.fulltext_scope_label(entry))

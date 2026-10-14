@@ -131,6 +131,11 @@ def source_nature_of(name: str, unit: str | None, *, source_nature: dict,
             return str(override)
     return str(source_nature.get(name) or "news")
 
+# Sources switched off by default. `weibo` is here because its hot-search list
+# is noisy and rarely survives a day, but the collector and its board renderer
+# both stay in the tree: deleting the name turns the source back on.
+DEFAULT_DISABLED = ["weibo"]
+
 # Sources whose `collect` accepts a fulltext policy.
 # anywayfm is absent on purpose: /now/ is a list of recommended links and its
 # "full text" would be a third-party article reached via a 301 redirect.

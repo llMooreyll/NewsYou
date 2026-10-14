@@ -26,7 +26,8 @@ LEGACY_MARKER = 'class="asset-content entry-content"'
 def _link_fix(url: str) -> str:
     return url.replace("http://www.ruanyifeng.com", "https://www.ruanyifeng.com")
 
-def collect(limit: int = 10, fulltext=base.FULLTEXT_DEFAULT, engine: str = "legacy", **_):
+def collect(limit: int = 10, fulltext=base.FULLTEXT_DEFAULT, engine: str = "legacy",
+            workers: int = base.DEFAULT_WORKERS, **_):
     items = feedmod.feed_items(FEED_URL, SOURCE, NAME, engine=engine,
                                kind="newsletter", link_fix=_link_fix, limit=limit)
 
@@ -57,21 +58,28 @@ def collect(limit: int = 10, fulltext=base.FULLTEXT_DEFAULT, engine: str = "lega
             print(f"  ! archives failed: {exc}", file=sys.stderr)
 
     items = items[:limit]
-    _fetch_bodies(items, engine=engine, fulltext=fulltext)
+    _fetch_bodies(items, engine=engine, fulltext=fulltext, workers=workers)
     return items
 
-def _fetch_bodies(items: list[dict], *, engine: str, fulltext) -> None:
-    for entry in base.fulltext_targets(items, fulltext):
-        scope = base.fulltext_scope_label(entry)
+def _fetch_bodies(items: list[dict], *, engine: str, fulltext,
+                  workers: int = base.DEFAULT_WORKERS) -> None:
+    targets = list(base.fulltext_targets(items, fulltext))
+
+    def body_for(entry: dict) -> dict | None:
         try:
             html = base.fetch(entry["url"])
         except FetchError as exc:
             print(f"  ! body failed {entry['url']}: {exc}", file=sys.stderr)
-            continue
-        body = ex.extract_article(html, entry["url"], engine, legacy_marker=LEGACY_MARKER)
-        if body:
+            return None
+        body = ex.extract_article(html, entry["url"], engine,
+                                  legacy_marker=LEGACY_MARKER, include_images=True)
+        if body and body.get("text"):
             # the trailing "相关文章" block is site furniture, not content
-            if body.get("text"):
-                body["text"] = re.sub(r"相关文章\s*$", "", body["text"]).strip()
-            base.write_body(entry, body, engine=engine, scope=scope)
+            body["text"] = re.sub(r"相关文章\s*$", "", body["text"]).strip()
         time.sleep(0.4)
+        return body
+
+    for entry, body in zip(targets, base.parallel_map(body_for, targets, workers)):
+        if body:
+            base.write_body(entry, body, engine=engine,
+                            scope=base.fulltext_scope_label(entry))

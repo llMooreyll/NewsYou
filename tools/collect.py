@@ -60,8 +60,11 @@ def _source_kwargs(name: str, args) -> dict:
             "fulltext": feed.get("fulltext") or args.fulltext,
         }
     if name == "telegram":
-        return {"day": args.day, "pages": args.pages, "channels": args.channels}
-    kwargs: dict = {}
+        return {"day": args.day, "pages": args.pages, "channels": args.channels,
+                "workers": args.workers}
+    # Every collector accepts `workers` (the ones with nothing to parallelise
+    # just ignore it), so the concurrency setting is one place, not per source.
+    kwargs: dict = {"workers": args.workers}
     if name in registry.FULLTEXT_SOURCES:
         kwargs["fulltext"] = args.fulltext
     if name == "linuxdo" and args.date:
@@ -128,7 +131,8 @@ def _postprocess(name: str, items: list[dict], args, outdir: Path) -> list[dict]
     outdir.mkdir(parents=True, exist_ok=True)
     if not args.no_images:
         saved = tg.download_for_items(items, base.media_root(),
-                                      args.images_per_post, args.image_cap)
+                                      args.images_per_post, args.image_cap,
+                                      args.workers)
         print(f"  telegram images saved: {saved}", file=sys.stderr)
     (outdir / "telegram_duplicate_groups.json").write_text(
         json.dumps({"generated_at": datetime.now(CST).isoformat(), "groups": groups},
@@ -161,6 +165,9 @@ def main() -> int:
                         help="do not download telegram post images")
     parser.add_argument("--images-per-post", type=int, default=None)
     parser.add_argument("--image-cap", type=int, default=None)
+    parser.add_argument("--workers", type=int, default=None,
+                        help="concurrent fetches per source (default from "
+                             "config: collect.workers; 1 = serial)")
     parser.add_argument("--dates", action="store_true")
     parser.add_argument("--list-sources", action="store_true")
     parser.add_argument("--list", action="store_true")
@@ -174,6 +181,7 @@ def main() -> int:
         "collect.limit": args.limit,
         "collect.images_per_post": args.images_per_post,
         "collect.image_cap": args.image_cap,
+        "collect.workers": args.workers,
         "telegram.day": args.day,
         "telegram.pages": args.pages,
         "paths.collected": args.outdir,
@@ -191,6 +199,7 @@ def main() -> int:
     args.pages = cfg.get("telegram.pages")
     args.images_per_post = cfg.get("collect.images_per_post")
     args.image_cap = cfg.get("collect.image_cap")
+    args.workers = max(1, int(cfg.get("collect.workers") or 1))
     args.outdir = Path(cfg.get("paths.collected"))
     args.aidir = Path(cfg.get("paths.ai"))
     args.channels = list(cfg.get("telegram.channels") or [])
@@ -209,6 +218,14 @@ def main() -> int:
     for name in registry.SOURCES:
         if name not in order:
             order.append(name)
+    disabled = set(cfg.get("sources.disabled") or [])
+    if disabled:
+        unknown = disabled - set(registry.SOURCES)
+        if unknown:
+            print(f"config error: sources.disabled names unknown source(s): "
+                  f"{', '.join(sorted(unknown))}", file=sys.stderr)
+            return 2
+        order = [name for name in order if name not in disabled]
     if cfg.get("sources.enabled"):
         wanted = set(cfg.get("sources.enabled"))
         unknown = wanted - set(registry.SOURCES)

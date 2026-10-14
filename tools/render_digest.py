@@ -229,20 +229,32 @@ def item_anchor(entry: dict) -> str:
 # --------------------------------------------------------------------------
 
 _ALLOWED_TAGS = {"p", "br", "h2", "h3", "h4", "strong", "b", "em", "i",
-                 "code", "pre", "blockquote", "ul", "ol", "li", "a"}
+                 "code", "pre", "blockquote", "ul", "ol", "li", "a", "img"}
 _DROP_CONTENT_TAGS = {"script", "style", "iframe", "noscript", "svg", "form",
-                      "button", "input", "select", "textarea", "img", "figure", "video"}
+                      "button", "input", "select", "textarea", "figure", "video"}
 _VOID_TAGS = {"img", "input", "br", "hr", "source", "wbr"}
 _TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9-]*)([^>]*?)(/?)\s*>")
 _HREF_RE = re.compile(r"href\s*=\s*(\"([^\"]*)\"|'([^']*)')", re.I)
+_SRC_RE = re.compile(r"src\s*=\s*(\"([^\"]*)\"|'([^']*)')", re.I)
+_ALT_RE = re.compile(r"alt\s*=\s*(\"([^\"]*)\"|'([^']*)')", re.I)
 
 
-def _safe_href(attrs: str) -> str | None:
-    match = _HREF_RE.search(attrs or "")
+def _attr(pattern, attrs: str) -> str | None:
+    match = pattern.search(attrs or "")
     if not match:
         return None
-    url = html.unescape(match.group(2) if match.group(2) is not None else match.group(3) or "").strip()
-    return url if url.startswith(("http://", "https://")) else None
+    value = match.group(2) if match.group(2) is not None else match.group(3) or ""
+    return html.unescape(value).strip()
+
+def _safe_href(attrs: str) -> str | None:
+    url = _attr(_HREF_RE, attrs)
+    return url if url and url.startswith(("http://", "https://")) else None
+
+def _safe_src(attrs: str) -> str | None:
+    """Only remote http(s). A data: URL here would be an inline payload of
+    unknown size arriving from a page we do not control."""
+    url = _attr(_SRC_RE, attrs)
+    return url if url and url.startswith(("http://", "https://")) else None
 
 
 def sanitize_html(fragment: str) -> str:
@@ -289,7 +301,15 @@ def sanitize_html(fragment: str) -> str:
                 else:
                     a_kept.append(False)
             continue
-        if name == "br":
+        if name == "img":
+            # Body images stay as remote URLs: inlining them would add tens of
+            # megabytes (measured ~248 KiB each, 6-11 per article), and the
+            # digest is meant to be one shareable file.
+            src = _safe_src(attrs)
+            if src:
+                alt = _attr(_ALT_RE, attrs) or ""
+                out.append(f'<img src="{esc(src)}" alt="{esc(alt)}" loading="lazy" decoding="async">')
+        elif name == "br":
             out.append("<br>")
         elif closing:
             if name in open_stack:
@@ -566,8 +586,11 @@ def _cite(ref: dict) -> str:
     if not key or not name:
         return ""
     key = str(key)
+    # "去…看原文" rather than the bare source name: the chip is an action, and
+    # a lone "少数派 ↗" next to a summary reads like a label, not a link.
+    label = f"去{name}看原文"
     return (f'<a class="cite" href="#it-{esc(key)}" data-jump="{esc(key)}" '
-            f'title="{esc(ref.get("title") or name)}">{esc(name)} ↗</a>')
+            f'title="{esc(ref.get("title") or name)}">{esc(label)}</a>')
 
 def _cites(refs) -> str:
     """One chip per distinct item, in the order given."""
@@ -662,7 +685,7 @@ def render_digest_panel(digest: dict | None, categories: dict | None = None) -> 
         secs.append(f'<section class="sec" id="dg-summary">'
                     f'<h2 class="sec-h">汇总</h2>{body}{_keyword_cloud(keywords)}</section>')
 
-    for anchor, heading, side in (("dg-cats", "分类", news), ("dg-disc", "讨论", discussion)):
+    for anchor, heading, side in (("dg-cats", "新闻", news), ("dg-disc", "讨论", discussion)):
         block = _side_section(anchor, heading, side)
         if block:
             secs.append(block)
@@ -679,7 +702,7 @@ def render_digest_panel(digest: dict | None, categories: dict | None = None) -> 
     if summary or keywords:
         links.append(("dg-summary", "汇总", len(keywords) or None))
     if news_cats:
-        links.append(("dg-cats", "分类", news.get("classified"),
+        links.append(("dg-cats", "新闻", news.get("classified"),
                       [(c.get("anchor"), c.get("name"), len(c.get("refs") or []))
                        for c in news_cats]))
     if disc_cats:
@@ -855,7 +878,7 @@ def _tg_card(entry: dict, index: int, embed: bool, out_dir: Path) -> tuple[str, 
                                            "text": orig.get("text") or ""}})
             body_o = (f'<p><b>{esc(op["title"])}</b></p>' if op["title"] else "") + op["body"]
             blocks.append(
-                f'<div class="og"><div class="og-h"><span class="ch">@{esc(orig.get("channel") or "")}</span>'
+                f'<div class="og"><div class="og-h"><span class="ch">{esc(_channel_name(orig))}</span>'
                 f'<time>{esc(fmt_time(orig.get("published_at")))}</time>'
                 f'{ext(orig.get("url"), "原文 ↗")}</div><div class="tg-b">{body_o}</div></div>')
         tpl = (f'<template id="og-{index}"><p class="ov-note">{esc(entry.get("title"))}</p>'
@@ -1021,6 +1044,11 @@ def article_rows(items: list[dict], *, start: int = 0) -> str:
             meta.append('<span class="x">独家</span>')
         tags = []
         for t in e.get("tags") or []:
+            # A collector may hand back {"label": …, "label_url": …}; taking the
+            # label is what the reader wants, and str(dict) would print the
+            # whole record as the tag text.
+            if isinstance(t, dict):
+                t = t.get("label") or t.get("title") or t.get("name") or ""
             tags += [s.strip() for s in str(t).split(",") if s.strip()]
         meta += [f'<span class="tag">#{esc(t)}</span>' for t in tags[:4]]
 
@@ -1107,13 +1135,43 @@ def render_sspai_panel(items: list[dict], status: dict | None = None) -> str:
                     + (f'<span>{esc(group[0]["author"])}</span>' if group[0].get("author") else "")
                     + f'<span>{len(group)} 条</span></div></header>')
             blocks = []
+            digest: list[dict] = []
+
+            def flush_digest() -> None:
+                """Draw the 简讯 roundup as one block rather than one per notice.
+
+                Classification still sees each notice on its own — this is only
+                how the panel draws them. Each keeps its `it-` anchor, so a
+                citation from the summary still lands on the right notice.
+                """
+                if not digest:
+                    return
+                first = digest[0]["extra"].get("issue_index") or 0
+                anchor = f"sp-digest-{first}"
+                items = "".join(
+                    f'<div class="digest-item" id="{item_anchor(e)}">'
+                    f'<div class="prose">{body_fragment(e, rich)}</div></div>'
+                    for e in digest)
+                blocks.append(
+                    f'<section class="sec blk rv" style="--i:{first}" id="{anchor}">'
+                    f'<h4 class="blk-h"><span class="no">{first:02d}</span>简讯'
+                    f'<span class="n">{len(digest)}</span></h4>'
+                    f'<div class="digest-items">{items}</div></section>')
+                children.append((anchor, "简讯", len(digest)))
+                digest.clear()
+
             for entry in group:
+                if (entry.get("extra") or {}).get("is_digest"):
+                    digest.append(entry)
+                    continue
+                flush_digest()
                 index = entry["extra"].get("issue_index") or 0
                 blocks.append(
                     f'<section class="sec blk rv" style="--i:{index}" id="{item_anchor(entry)}">'
                     f'<h4 class="blk-h"><span class="no">{index:02d}</span>{esc(entry.get("title"))}</h4>'
                     f'<div class="prose">{body_fragment(entry, rich)}</div></section>')
                 children.append((item_anchor(entry), entry.get("title"), None))
+            flush_digest()
             rendered.append(f'<div class="sec feat-issue">{head}'
                             f'<div class="feat-items">{"".join(blocks)}</div></div>')
         secs.append(f'<section class="sec" id="sp-brief">'

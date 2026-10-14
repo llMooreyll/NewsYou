@@ -26,7 +26,8 @@ from .base import CST
 def collect(limit: int = 20, fulltext=base.FULLTEXT_DEFAULT, engine: str = "legacy",
             *, url: str | None = None, name: str | None = None,
             source: str | None = None, kind: str = "article",
-            date_source: str = "rss", **_):
+            date_source: str = "rss",
+            workers: int = base.DEFAULT_WORKERS, **_):
     """Fetch one configured feed and normalise it into items."""
     if not url:
         raise ValueError("rss source needs a 'url'")
@@ -37,5 +38,6 @@ def collect(limit: int = 20, fulltext=base.FULLTEXT_DEFAULT, engine: str = "lega
                                date_source=date_source, limit=limit)
     if fulltext != "none" and items:
         feedmod.fetch_bodies(items, engine=engine, fulltext=fulltext,
-                             today=datetime.now(CST).date())
+                             today=datetime.now(CST).date(), include_images=True,
+                             workers=workers)
     return items

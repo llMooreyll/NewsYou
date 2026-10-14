@@ -297,6 +297,25 @@ class SspaiPanel(unittest.TestCase):
         self.assertNotIn("停稿", html)
         self.assertNotIn("尚未发布", html)
 
+    def test_the_roundup_is_one_block(self):
+        """简讯 is drawn as a single block even though each notice is its own
+        item: the classification needs them apart, the page reads better
+        together."""
+        html = render_digest.render_sspai_panel(self.children, {"brief_state": "published"})
+        self.assertEqual(html.count('class="digest-item"'), 2)
+        self.assertIn("简讯", html)
+        self.assertNotIn("三星即将推出的首款智能眼镜规格披露</h4>", html)
+
+    def test_each_notice_keeps_its_own_anchor(self):
+        """The chip from the summary has to land on the notice it names."""
+        html = render_digest.render_sspai_panel(self.children, {"brief_state": "published"})
+        for child in self.children:
+            self.assertIn(f'id="it-{child["id"]}"', html)
+
+    def test_the_roundup_is_one_rail_entry(self):
+        html = render_digest.render_sspai_panel(self.children, {"brief_state": "published"})
+        self.assertIn('data-target="sp-digest-3"', html)
+
 # --------------------------------------------------------------------------
 # digest summary stage
 # --------------------------------------------------------------------------

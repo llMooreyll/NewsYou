@@ -51,6 +51,10 @@ images_per_post = 2
 image_cap = 200
 # Global per-source item limit. 0 means "use sources.limits below".
 limit = 0
+# Concurrent fetches. Nearly all of a run is spent waiting on other people's
+# servers, so threads cut the wall clock a lot; the ceiling is politeness, not
+# the machine. 1 = strictly serial.
+workers = 4
 
 [telegram]
 # Public channels to follow. Adding one is a single string; no code change.
@@ -81,6 +85,10 @@ order = ["sspai", "telegram", "linuxdo", "latepost", "geekpark", "solidot",
 # Optional whitelist: when non-empty, only these sources are collected.
 # Empty means "everything in order".
 enabled = []
+# Sources to switch off by name. `weibo` is off because its hot-search list is
+# noisy and its content rarely survives a day; the collector and its board
+# renderer are both still here, so removing the name below turns it back on.
+disabled = ["weibo"]
 
 # Per-source item limits.
 [sources.limits]

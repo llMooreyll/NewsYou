@@ -439,19 +439,34 @@ def pick_day(day_counts_by_channel: dict[str, dict[str, int]]) -> str | None:
     return max(days) if days else None
 
 def collect(limit: int = 400, day: str = "auto", pages: int = 4,
-            channels: list[str] | None = None, **_):
+            channels: list[str] | None = None, workers: int = base.DEFAULT_WORKERS, **_):
     channels = channels or DEFAULT_CHANNELS
     target = resolve_day(day)
-    walked: dict[str, list[dict]] = {}
     report: dict[str, dict] = {}
 
-    for channel in channels:
+    def walk(channel: str) -> tuple[str, list[dict], dict | None]:
+        """Walk one channel. Returns (channel, posts, failure) and never raises.
+
+        Each channel is independent — its own pages, its own cursor — so they
+        run together; `walk_channel` still paces the pages *within* a channel,
+        which is where politeness actually matters.
+        """
         try:
-            walked[channel] = walk_channel(channel, pages, None)
+            return channel, walk_channel(channel, pages, None), None
         except PreviewError as exc:
-            print(f"  ! telegram {channel} failed: {exc}", file=sys.stderr)
-            report[channel] = {"ok": False, "error": str(exc), "fetched": 0, "kept": 0,
-                               "title": CHANNEL_TITLES.get(channel) or ""}
+            return channel, [], {"ok": False, "error": str(exc), "fetched": 0, "kept": 0,
+                                 "title": CHANNEL_TITLES.get(channel) or ""}
+
+    walked: dict[str, list[dict]] = {}
+    for channel, posts, failure in base.parallel_map(walk, channels, workers):
+        if failure:
+            print(f"  ! telegram {channel} failed: {failure['error']}", file=sys.stderr)
+            report[channel] = failure
+            continue
+        # Only successful channels enter `walked`: the reporting loop below
+        # writes an ok=True record for everything in it, which would otherwise
+        # overwrite the failure just recorded.
+        walked[channel] = posts
 
     day_counts: dict[str, dict[str, int]] = {}
     for channel, posts in walked.items():
@@ -510,25 +525,36 @@ def collect(limit: int = 400, day: str = "auto", pages: int = 4,
     return collected[:limit]
 
 def download_for_items(items: list[dict], media_root: Path, per_post: int = 2,
-                       cap: int = 200) -> int:
+                       cap: int = 200, workers: int = base.DEFAULT_WORKERS) -> int:
     """Download images for already-collected items, grouped by channel."""
     by_channel: dict[str, list[dict]] = {}
     for entry in items:
         by_channel.setdefault(entry["extra"]["channel"], []).append(entry)
 
-    total = 0
-    for channel, group in by_channel.items():
-        if total >= cap:
-            break
+    # One task per channel, so different channels download at the same time.
+    # `cap` is per channel here and the total is capped afterwards: splitting a
+    # shared budget across concurrent workers would need a lock for a bound
+    # that is only a safety net anyway.
+    per_channel_cap = cap
+
+    def fetch_channel(channel: str) -> tuple[str, list[dict], int]:
+        group = by_channel[channel]
         shim = [{"message_id": e["extra"].get("message_id"), "photos": e["extra"].get("photos") or []}
                 for e in group]
         try:
             files, _bytes, _skipped = download_images(
-                shim, channel, media_root, per_post, cap - total)
+                shim, channel, media_root, per_post, per_channel_cap)
         except Exception as exc:  # noqa: BLE001
             print(f"  ! image download failed for {channel}: {exc}", file=sys.stderr)
-            continue
-        total += files
-        for entry, shim_entry in zip(group, shim):
+            return channel, shim, 0
+        return channel, shim, files
+
+    total = 0
+    for channel, shim, files in base.parallel_map(fetch_channel, sorted(by_channel),
+                                                 workers):
+        for entry, shim_entry in zip(by_channel[channel], shim):
             entry["extra"]["local_images"] = shim_entry.get("local_images") or []
-    return total
+        total += files
+        if total >= cap:
+            break
+    return min(total, cap)

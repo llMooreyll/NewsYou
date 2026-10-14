@@ -26,6 +26,7 @@ import ai_apply  # noqa: E402
 import ai_model  # noqa: E402
 import ai_stage  # noqa: E402
 import archive  # noqa: E402
+import config  # noqa: E402
 import render_digest  # noqa: E402
 
 
@@ -466,3 +467,73 @@ class RendererReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+# --------------------------------------------------------------------------
+# concurrency
+# --------------------------------------------------------------------------
+
+class ParallelMap(unittest.TestCase):
+    """The helpers behind concurrent fetching.
+
+    Nothing here asserts on wall clock: the point is that results keep their
+    input order, that `workers=1` is the old serial path, and that one failure
+    does not silently drop the rest.
+    """
+
+    def test_order_is_preserved_whatever_the_timing(self):
+        import time as _time
+
+        def slow(n):
+            _time.sleep((5 - n) * 0.01)      # later items finish first
+            return n * 2
+        self.assertEqual(base.parallel_map(slow, [1, 2, 3, 4, 5], 4),
+                         [2, 4, 6, 8, 10])
+
+    def test_workers_one_is_serial(self):
+        seen = []
+
+        def record(n):
+            seen.append(n)
+            return n
+        self.assertEqual(base.parallel_map(record, [1, 2, 3], 1), [1, 2, 3])
+        self.assertEqual(seen, [1, 2, 3])
+
+    def test_an_empty_batch_needs_no_threads(self):
+        self.assertEqual(base.parallel_map(lambda x: x, [], 4), [])
+
+    def test_a_single_item_does_not_spawn_a_pool(self):
+        self.assertEqual(base.parallel_map(lambda x: x + 1, [1], 8), [2])
+
+class TelegramChannelFailure(unittest.TestCase):
+    """A failed channel must stay failed, and must not take the batch down."""
+
+    def test_one_broken_channel_does_not_hide_the_others(self):
+        def fake_walk(channel, pages, before, **_):
+            if channel == "broken":
+                raise tg.PreviewError("no public preview content")
+            return tg.parse_posts(_tg_page(channel, [(1, "2026-10-13T08:00:00+08:00",
+                                                      "<b>t</b><br/>x")]))
+        with mock.patch.object(tg, "walk_channel", side_effect=fake_walk):
+            items = tg.collect(day="2026-10-13", channels=["ok1", "broken", "ok2"],
+                               workers=3)
+        report = tg.last_report()["channels"]
+        self.assertFalse(report["broken"]["ok"])
+        self.assertEqual(sorted(c for c in report if report[c]["ok"]), ["ok1", "ok2"])
+        self.assertEqual({i["extra"]["channel"] for i in items}, {"ok1", "ok2"})
+
+class DisabledSources(unittest.TestCase):
+    def test_a_disabled_source_is_left_out(self):
+        cfg = config.load(ROOT / "config" / "config.toml")
+        self.assertIn("weibo", cfg.get("sources.disabled"))
+        self.assertNotIn("weibo", ai_stage.expected_sources(cfg))
+
+    def test_the_default_matches_the_shipped_file(self):
+        """config.toml is documented as a no-op, so the two must agree."""
+        self.assertEqual(config.load(ROOT / "config" / "config.toml").get("sources.disabled"),
+                         config.defaults()["sources"]["disabled"])
+
+    def test_the_weibo_collector_is_still_there(self):
+        """Disabled, not removed: deleting the name turns it back on."""
+        from collectors import registry
+        self.assertIn("weibo", registry.SOURCES)
+        self.assertTrue(hasattr(render_digest, "render_weibo_board"))

@@ -126,6 +126,9 @@ def expected_sources(cfg) -> list[str]:
     for feed in cfg.get("feeds") or []:
         if feed.get("id") and feed["id"] not in names:
             names.append(feed["id"])
+    disabled = set(cfg.get("sources.disabled") or [])
+    if disabled:
+        names = [name for name in names if name not in disabled]
     enabled = cfg.get("sources.enabled") or []
     if enabled:
         wanted = set(enabled)

@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import re
 import sys
-import time
 from datetime import datetime
 
 from . import base
@@ -258,7 +257,8 @@ def brief_state(issues: list[dict], today: datetime | None = None) -> str:
 # collect
 # --------------------------------------------------------------------------
 
-def collect(limit: int = 20, fulltext=base.FULLTEXT_DEFAULT, engine: str = "legacy", **_):
+def collect(limit: int = 20, fulltext=base.FULLTEXT_DEFAULT, engine: str = "legacy",
+            workers: int = base.DEFAULT_WORKERS, **_):
     try:
         items = _from_api(limit)
     except (FetchError, json.JSONDecodeError, ValueError) as exc:
@@ -283,22 +283,34 @@ def collect(limit: int = 20, fulltext=base.FULLTEXT_DEFAULT, engine: str = "lega
     targets = {id(e) for e in latest}
     targets |= {id(e) for e in base.fulltext_targets(rest, fulltext)}
 
+    def fetch(entry: dict) -> tuple[dict, dict | None]:
+        """One body, fetched without touching the item yet.
+
+        Fetching is the slow part and is independent per item, so it happens in
+        parallel; applying the result is sequential and in order, which keeps
+        the split items next to each other and the output deterministic.
+        """
+        scope = base.fulltext_scope_label(entry)
+        try:
+            return entry, _fetch_body(entry, engine)
+        except (ValueError, FetchError, json.JSONDecodeError) as exc:
+            print(f"  ! sspai fulltext failed {entry['url']}: {exc}", file=sys.stderr)
+            return entry, None
+
+    wanted = [e for e in items if id(e) in targets]
+    bodies = dict((id(e), b) for e, b in base.parallel_map(fetch, wanted, workers))
+
     out: list[dict] = []
     for entry in items:
         if id(entry) not in targets:
             out.append(entry)
             continue
         scope = base.fulltext_scope_label(entry)
-        try:
-            body = _fetch_body(entry, engine)
-        except (ValueError, FetchError, json.JSONDecodeError) as exc:
-            print(f"  ! sspai fulltext failed {entry['url']}: {exc}", file=sys.stderr)
-            body = None
+        body = bodies.get(id(entry))
         if not body:
             out.append(entry)
             continue
-        split = (_split_issue(entry, body, engine, scope)
-                 if entry in latest else [])
+        split = _split_issue(entry, body, engine, scope) if entry in latest else []
         if split:
             out.extend(split)
             print(f"  sspai: split 派早报 {entry.get('url')} into {len(split)} items",
@@ -306,7 +318,6 @@ def collect(limit: int = 20, fulltext=base.FULLTEXT_DEFAULT, engine: str = "lega
         else:
             base.write_body(entry, body, engine=engine, scope=scope)
             out.append(entry)
-        time.sleep(0.5)
 
     _LAST_STATE["brief_state"] = state
     return out
@@ -328,7 +339,7 @@ def _fetch_body(entry: dict, engine: str) -> dict | None:
     html = base.fetch(POST_URL.format(id=article_id))
     from . import extract as ex
     if engine == "modern":
-        return ex.extract_article(html, entry["url"], "modern")
+        return ex.extract_article(html, entry["url"], "modern", include_images=True)
     block = base.container_at(html, LEGACY_MARKER)
     if not block:
         return None

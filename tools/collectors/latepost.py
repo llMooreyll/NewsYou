@@ -48,7 +48,11 @@ def collect(limit: int = 15, fulltext=base.FULLTEXT_DEFAULT, engine: str = "lega
     now = base.datetime.now(base.CST)
     items: list[dict] = []
     for row in rows[:limit]:
-        labels = [x for x in (row.get("label") or []) if x]
+        # The API returns label records ({"label": …, "label_url": …}); the
+        # item contract is a list of strings, and str(dict) in the panel would
+        # print the whole record as the tag text.
+        labels = [x.get("label") for x in (row.get("label") or [])
+                  if isinstance(x, dict) and x.get("label")]
         items.append(base.item(
             SOURCE, NAME, row.get("title") or "",
             DETAIL_PREFIX + (row.get("detail_url") or ""), kind="article",

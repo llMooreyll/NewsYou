@@ -21,6 +21,7 @@ import json
 import re
 import ssl
 import time
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -93,6 +94,35 @@ def fetch(url: str, *, referer: str | None = None, timeout: int = 25, retries: i
 
 def fetch_json(url: str, **kw):
     return json.loads(fetch(url, **kw))
+
+# --------------------------------------------------------------------------
+# Concurrency
+# --------------------------------------------------------------------------
+
+DEFAULT_WORKERS = 4
+
+def parallel_map(fn, items, workers: int = DEFAULT_WORKERS) -> list:
+    """Apply `fn` to each item with a bounded number of threads.
+
+    These calls block on the network, and urllib releases the GIL while it
+    waits, so threads give real concurrency here without pulling in asyncio.
+    Most of a run's wall clock is spent waiting on other people's servers, and
+    the number of requests is what it is either way.
+
+    The worker count is deliberately small and configurable. These are other
+    people's servers: a burst of connections is both rude and the quickest way
+    to get rate-limited or blocked, which would cost far more than it saves.
+
+    Order is preserved — results come back where their inputs were — so a run
+    stays reproducible whatever order the requests happen to finish in. `fn` is
+    expected to handle its own per-item errors; an exception here aborts the
+    whole batch, which is the caller's choice to make.
+    """
+    items = list(items)
+    if workers <= 1 or len(items) <= 1:
+        return [fn(item) for item in items]
+    with ThreadPoolExecutor(max_workers=min(workers, len(items))) as pool:
+        return list(pool.map(fn, items))
 
 # --------------------------------------------------------------------------
 # Text / HTML helpers

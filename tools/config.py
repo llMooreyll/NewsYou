@@ -84,6 +84,11 @@ def defaults() -> dict:
         },
         "collect": {
             "engine": "modern",
+            # How many sources, channels and pages may be fetched at once. The
+            # work is all network waiting, so threads give real speedup, but a
+            # large number is both rude to the sites and the quickest way to get
+            # rate-limited. 1 restores strictly serial fetching.
+            "workers": 4,
             "fulltext": "today",
             "images": True,
             "images_per_post": 2,
@@ -101,6 +106,10 @@ def defaults() -> dict:
         "sources": {
             "order": list(registry.ORDER),
             "enabled": [],                  # empty = every source in order
+            # Off by name. Kept separate from `enabled` so switching one source
+            # off does not mean listing all the others, and so adding a source
+            # later cannot silently stay disabled.
+            "disabled": list(registry.DEFAULT_DISABLED),
             # Only registered sources have a built-in limit; a [[feeds]] entry
             # brings its own (`limit = 20`) and is absent here on purpose.
             "limits": {name: registry.default_limit(name) for name in registry.ORDER

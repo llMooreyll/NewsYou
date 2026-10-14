@@ -418,6 +418,10 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
 .prose a:hover,.lnk:hover{text-decoration-color:var(--accent-2)}
 .prose blockquote{padding-left:16px;border-left:2px solid var(--line-3);color:var(--fg-3)}
 .prose ul,.prose ol{padding-left:1.3em}
+/* Body images stay remote, so their height is unknown until they load; the
+   placeholder keeps the text from jumping once they arrive. */
+.prose img{margin:1.1em 0;border-radius:4px;background:var(--s1);min-height:80px}
+.prose figure{margin:1.1em 0}
 .prose li + li{margin-top:.35em}
 .prose li::marker{color:var(--fg-4)}
 .prose code{font-family:var(--mono);font-size:.88em;background:var(--s2);padding:1px 5px;border-radius:var(--r)}
@@ -445,6 +449,13 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
   font-weight:700;letter-spacing:.005em;color:var(--fg);margin-bottom:12px}
 .blk-h .no{font-family:var(--mono);font-size:11px;font-weight:400;color:var(--fg-4);flex:none;width:20px}
 .blk .prose{padding-left:34px}
+/* The 简讯 roundup: one block holding several notices, so the page reads as
+   "the brief had a roundup" rather than four separate stories. */
+.digest-items{padding-left:34px}
+.digest-item + .digest-item{margin-top:14px;padding-top:14px;border-top:1px dashed var(--line)}
+.digest-item .prose{padding-left:0}
+.digest-item .prose > ul{margin:0;padding-left:18px}
+.blk-h .n{font-family:var(--mono);font-size:11px;font-weight:400;color:var(--fg-4)}
 
 /* ======================================================================
    linux.do — compact topic rows, two columns on wide screens
@@ -695,6 +706,7 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
   .ar-d{display:flex;gap:8px;padding:0}
   .ar-d .d.rep{visibility:visible}
   .blk .prose{padding-left:0}
+  .digest-items{padding-left:0}
   .feat-items{padding-left:16px}
   .blk::before{left:-20px}
   .prose{text-align:left}

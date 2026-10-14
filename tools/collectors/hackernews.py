@@ -11,23 +11,31 @@ NAME = "Hacker News"
 API = "https://hacker-news.firebaseio.com/v0/{feed}.json"
 ITEM = "https://hacker-news.firebaseio.com/v0/item/{id}.json"
 
-def collect(limit: int = 15, feed: str = "topstories", **_):
+def collect(limit: int = 15, feed: str = "topstories",
+            workers: int = base.DEFAULT_WORKERS, **_):
+    """The story list, then one request per story — those run together.
+
+    The API is one endpoint per item, so fetching them one at a time made this
+    the slowest source after Telegram. `parallel_map` keeps the list's order,
+    so the board still reads in rank order.
+    """
     ids = base.fetch_json(API.format(feed=feed))
-    items: list[dict] = []
-    for story_id in ids[:limit]:
+
+    def story(story_id) -> dict | None:
         try:
-            story = base.fetch_json(ITEM.format(id=story_id))
+            record = base.fetch_json(ITEM.format(id=story_id))
         except (FetchError, ValueError):
-            continue
-        if not story or story.get("type") != "story":
-            continue
-        items.append(base.item(
-            SOURCE, NAME, story.get("title") or "",
-            story.get("url") or f"https://news.ycombinator.com/item?id={story_id}",
-            kind="link", published_at=story.get("time"), date_source="api",
-            author=story.get("by"),
-            extra={"collector": "firebase_api", "score": story.get("score"),
-                   "comments": story.get("descendants"),
+            return None
+        if not record or record.get("type") != "story":
+            return None
+        return base.item(
+            SOURCE, NAME, record.get("title") or "",
+            record.get("url") or f"https://news.ycombinator.com/item?id={story_id}",
+            kind="link", published_at=record.get("time"), date_source="api",
+            author=record.get("by"),
+            extra={"collector": "firebase_api", "score": record.get("score"),
+                   "comments": record.get("descendants"),
                    "hn_url": f"https://news.ycombinator.com/item?id={story_id}"},
-        ))
-    return items
+        )
+
+    return [item for item in base.parallel_map(story, ids[:limit], workers) if item]
