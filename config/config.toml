@@ -54,8 +54,14 @@ limit = 0
 
 [telegram]
 # Public channels to follow. Adding one is a single string; no code change.
+# Its nature comes from [sources.units] below — a channel missing from there is
+# news, like the seven that were here before.
 channels = ["MaiTungNews", "tnews365", "zaihuapd", "xhqcankao",
-            "GodlyNews1", "NewlearnerChannel", "DNSPODT"]
+            "GodlyNews1", "NewlearnerChannel", "DNSPODT",
+            "douView", "Vwyxrd", "CNSmydream",
+            "reorx_share", "notonlyshare", "bigwalnut", "codedump_notes",
+            "hacker_news_zh", "gledos_microblogging",
+            "wxbyg", "zhihu_bazaar"]
 # Pages of roughly 20 posts to walk per channel.
 pages = 4
 # Which day's messages to keep: auto | today | yesterday | YYYY-MM-DD.
@@ -70,7 +76,7 @@ feed = "topstories"
 # Panel order. Purely ordering: every registered source still runs, and any not
 # named here is appended in its built-in position. To actually turn a source
 # off, list the ones you want in `enabled` below.
-order = ["sspai", "telegram", "linuxdo", "latepost", "geekpark",
+order = ["sspai", "telegram", "linuxdo", "latepost", "geekpark", "solidot",
          "ruanyifeng", "anywayfm", "hackernews", "weibo", "zhihu"]
 # Optional whitelist: when non-empty, only these sources are collected.
 # Empty means "everything in order".
@@ -89,6 +95,30 @@ hackernews = 15
 weibo = 15
 zhihu = 15
 
+# Which sources are not news. Anything unlisted is news.
+#
+#   discussion  sharing and community threads -> stage 2d, the 讨论 block
+#   longform    irregularly updated long reads -> no category at all, its own
+#               panel only (a weekly newsletter is not a day's news)
+[sources.nature]
+discussion = ["linuxdo", "hackernews"]
+longform = ["ruanyifeng", "anywayfm"]
+
+# Per-unit overrides for the sources that carry more than one nature.
+# Key is "<source>:<unit>", where the unit is a Telegram channel or a linux.do
+# section name. A unit not listed here follows its source, so only the
+# exceptions appear below.
+[sources.units]
+"telegram:reorx_share" = "discussion"
+"telegram:notonlyshare" = "discussion"
+"telegram:bigwalnut" = "discussion"
+"telegram:codedump_notes" = "discussion"
+"telegram:hacker_news_zh" = "discussion"
+"telegram:gledos_microblogging" = "discussion"
+"telegram:wxbyg" = "longform"
+"telegram:zhihu_bazaar" = "longform"
+"linuxdo:站外速览" = "news"
+
 # Panel display names.
 [sources.labels]
 sspai = "少数派"
@@ -96,6 +126,7 @@ telegram = "Telegram"
 linuxdo = "linux.do 晚报"
 latepost = "晚点 LatePost"
 geekpark = "极客公园"
+solidot = "奇客 Solidot"
 ruanyifeng = "阮一峰的网络日志"
 anywayfm = "Anyway.Now 安妮薇看看"
 hackernews = "Hacker News"
@@ -125,3 +156,14 @@ processed = "data/processed"
 # url      = "https://example.com/feed.xml"
 # fulltext = "today"
 # limit    = 20
+
+# 奇客 Solidot. The feed carries a 200–450 字 summary per story, which is
+# enough to classify and to show, so full text is off: the article page also
+# carries "solidot 新版网站常见问题" and a view counter that would end up
+# inside 阅读全文.
+[[feeds]]
+id       = "solidot"
+name     = "奇客 Solidot"
+url      = "https://www.solidot.org/index.rss"
+fulltext = "none"
+limit    = 20

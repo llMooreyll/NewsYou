@@ -27,6 +27,8 @@ Each item:
 |---|---|
 | `id` | stable reference, always use this |
 | `source` / `source_name` | which source it came from |
+| `nature` | `news`, `discussion` or `longform` |
+| `category` | the category stage 2c/2d already filed it under, or `null` |
 | `title` | original headline |
 | `summary` | excerpt, or the full post text for Telegram |
 | `body_text` | full article text when the collector fetched it, else `null` |
@@ -38,12 +40,17 @@ Each item:
 Sources whose `updated_today` is `false` are stale — they are still shown, but
 they must not dominate a "today" briefing. Prefer `is_today: true` items.
 
+`category` is not yours to change. Stage 2c/2d has already grouped the day, and
+that grouping is shown next to your briefing. `longform` items carry `null`:
+those sources are irregularly updated long reads and are not classified.
+
 ## How to judge importance
 
 Two independent signals. Use both, and say which one you used in `why`.
 
 **Signal A — corroboration.** The same event appears in several independent
-sources. Telegram has seven channels plus linux.do, 晚点, 极客公园, Hacker News.
+sources. Telegram alone carries eighteen channels plus linux.do, 晚点, 极客公园
+and Hacker News.
 An event reported by four unrelated sources matters more than one reported by
 one.
 
@@ -77,13 +84,6 @@ Return **JSON only**, no prose, no markdown fence:
       "why": "corroborated by 4 sources; policy impact"
     }
   ],
-  "themes": [
-    {
-      "name": "AI 芯片竞争",
-      "summary": "one sentence describing the pattern across these items",
-      "item_ids": ["…", "…"]
-    }
-  ],
   "stats_note": "one short sentence about today's volume or coverage gaps"
 }
 ```
@@ -95,8 +95,8 @@ Field rules:
   return three.
 - `item_ids` — every id referenced must exist in the input. Group items that
   cover the same event so the reader can jump to each original source.
-- `themes` — at most 5 recurring patterns across the day. A theme is not an
-  event; it is a pattern ("三家厂商同日发布 AI 芯片"). Optional.
+- `themes` — removed. The grouping is stage 2c/2d's job and is drawn on the page
+  next to your briefing; a highlight is an event, not a category.
 - `importance` — 0–100. Reserve 90+ for genuinely major events. Do not give
   everything 80+.
 - `why` — under 15 words, naming the signal you used.
@@ -111,3 +111,5 @@ Field rules:
 5. Do not pad `highlights` to reach ten. An honest three-item briefing beats a
    padded ten.
 6. If the day is genuinely thin, say so in `stats_note` and return few highlights.
+7. Do not propose categories or themes. The grouping is stage 2c/2d's job and is
+   already done; a highlight is an event, and one event may span categories.

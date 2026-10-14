@@ -207,6 +207,50 @@
   });
 
   /* ------------------------------------------------------------------
+   * citations: jump to the item inside its own panel
+   *
+   * The digest panel is a view over items that live in other panels, so a
+   * citation has to move the page. Order matters: show() first, because a
+   * hidden panel has no geometry and scrollIntoView would do nothing; then
+   * suppress the reveal animation, which restarts on unhide and would leave
+   * the target transparent while it scrolls; then lock the spy, so the rail is
+   * not dragged to a section the scroll merely passes through.
+   * ------------------------------------------------------------------ */
+  function flashAfterScroll(el) {
+    var done = false;
+    function end() {
+      if (done) return;
+      done = true;
+      el.classList.add('flash');
+      setTimeout(function () { el.classList.remove('flash'); }, 1600);
+    }
+    if ('onscrollend' in win) win.addEventListener('scrollend', end, { once: true });
+    setTimeout(end, reduce ? 60 : 650);   /* scrollend support varies; this is the floor */
+  }
+
+  function jumpTo(id, instant, keepHash) {
+    /* getElementById, never querySelector: item ids contain colons */
+    var target = doc.getElementById('it-' + id);
+    if (!target) return false;
+    var panel = target.closest('.panel');
+    if (panel && panel.id) show(panel.id.slice(2), { noHash: !!keepHash });
+    target.classList.add('no-rv');
+    spyLock = Date.now() + 900;
+    target.scrollIntoView({ block: 'nearest', behavior: (instant || reduce) ? 'auto' : 'smooth' });
+    flashAfterScroll(target);
+    return true;
+  }
+
+  doc.addEventListener('click', function (e) {
+    var a = e.target.closest('[data-jump]');
+    if (!a) return;
+    /* Keep the item id out of location.hash: boot reads that as a tab key, so
+       a reload after a click would land on the first tab. */
+    e.preventDefault();
+    jumpTo(a.dataset.jump);
+  });
+
+  /* ------------------------------------------------------------------
    * masonry: cards are dealt in reading order to the shortest column.
    * Image sizes are written at build time, so heights are final up front.
    * ------------------------------------------------------------------ */
@@ -464,10 +508,20 @@
 
   headH();
   $$('.panel').forEach(function (p) { if (!p.classList.contains('on')) p.hidden = true; });
-  var first = (location.hash || '').slice(1);
-  var initial = panelOf(first) ? first : (tabs[0] && tabs[0].dataset.tab);
+  /* #<tab> or #<tab>/it-<item id>. When both are present the item wins: a deep
+     link should land on what it names, not on whichever panel it happened to
+     spell first. */
+  var hash = (location.hash || '').slice(1);
+  var parts = hash.split('/');
+  var deepId = (parts[1] || '').replace(/^it-/, '');
+  var deepEl = deepId ? doc.getElementById('it-' + deepId) : null;
+  var first = parts[0];
+  var initial = deepEl ? deepEl.closest('.panel').id.slice(2)
+                       : (panelOf(first) ? first : (tabs[0] && tabs[0].dataset.tab));
   $$('.panel.on').forEach(function (p) { p.classList.remove('on'); });
-  if (initial) show(initial, { instant: true, keepScroll: true, noHash: !first });
+  if (initial) show(initial, { instant: true, keepScroll: true, noHash: !!deepEl || !first });
+  /* after show(), which rewrites the hash */
+  if (deepEl) jumpTo(deepId, true, true);
   $$('.rail').forEach(function (r) {
     var on = $('.rail-a.on', r) || $('.rail-a', r);
     if (on) setRail(r, on, true);

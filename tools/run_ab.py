@@ -85,7 +85,11 @@ def main() -> int:
                  "--collected", str(collected), "--ai", str(aidir)])
 
         run([python, str(TOOLS / "ai_apply.py"),
-             "--collected", str(collected), "--ai", str(aidir), "--out", str(processed)])
+             "--collected", str(collected), "--ai", str(aidir), "--out", str(processed),
+             # The demo decisions above stand in for the model. Without this,
+             # ai_apply falls back to ai.backend = "pi" and each engine makes
+             # four real calls instead of two.
+             "--ai-backend", "none"])
 
         run([python, str(TOOLS / "render_digest.py"),
              "--indir", str(processed), "--fallback", str(collected),

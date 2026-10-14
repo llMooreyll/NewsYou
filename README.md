@@ -2,7 +2,7 @@
 
 个人 Newsletter 聚合系统：把中英文多信源的一天内容抓下来，可选地交给模型去重、筛选，最后渲染成**一个自包含的 HTML 文件**。
 
-- **10 个信源**：少数派、Telegram（7 个频道）、linux.do、晚点、极客公园、阮一峰、Anyway.Now、Hacker News、微博热搜、知乎热榜
+- **11 个信源**：少数派、Telegram（18 个频道）、linux.do、晚点、极客公园、奇客 Solidot、阮一峰、Anyway.Now、Hacker News、微博热搜、知乎热榜
 - **单文件产出**：图片内联 base64，**零外部请求**——断网、离线、直接发文件都能看
 - **模型可选**：默认调用，`AI=none` 完全不调；模型只输出「决策」，脚本校验后应用
 - **一切可配置**：`config/config.toml`，删掉整个文件也能跑
@@ -49,10 +49,10 @@ make all AI=none
 |---|---|
 | `make setup` | 建 `.venv` 并安装 `requirements.txt` |
 | `make check` | 验证依赖与两个引擎是否可用 |
-| `make test` | 跑离线回归测试（63 项，不联网） |
+| `make test` | 跑离线回归测试（不联网） |
 | `make config` | 打印**生效配置**，并标注每个值来自哪一层 |
 | `make collect` | 只抓取 → `data/collected/` |
-| `make ai` | 只做 AI 两阶段 → `data/processed/` |
+| `make ai` | 只做 AI 四个子阶段 → `data/processed/` |
 | `make render` | 只渲染 → `site/digest.html` |
 | `make all` | collect + ai + render |
 | `make daily` | **日常用这个**：all + 归档当天快照 |
@@ -162,7 +162,7 @@ codex  codex exec --skip-git-repo-check --sandbox read-only --model <m> "<prompt
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `channels` | 7 个频道 | 要跟的公开频道。**加频道 = 加一个字符串** |
+| `channels` | 18 个频道 | 要跟的公开频道。**加频道 = 加一个字符串** |
 | `pages` | `4` | 每个频道翻几页（每页约 20 条） |
 | `day` | `"auto"` | 取哪天的消息。`auto` \| `today` \| `yesterday` \| `YYYY-MM-DD` |
 
@@ -179,12 +179,39 @@ codex  codex exec --skip-git-repo-check --sandbox read-only --model <m> "<prompt
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `order` | 10 个源 | **面板顺序**。纯粹是排序：没列到的源仍会运行，只是排在后面 |
+| `order` | 11 个源 | **面板顺序**。纯粹是排序：没列到的源仍会运行，只是排在后面 |
 | `enabled` | `[]` | **白名单**。非空时只抓这些源。空 = 全部 |
 | `[sources.limits]` | 各源不同 | 每个源抓多少条 |
 | `[sources.labels]` | 各源中文名 | 面板显示名 |
+| `[sources.nature]` | 见下 | 哪些源是讨论/长文。**没列到的一律是新闻** |
+| `[sources.units]` | 见下 | 单个频道或分节的性质覆盖，键为 `源:单元` |
 
 > **关源**用 `enabled`（从 `order` 里删掉**不会**关掉它，只会改变排序）；**改名**用 `labels`。
+
+`[sources.nature]` 决定一个源属于哪一类，也就决定它进哪一半流程：
+
+```toml
+[sources.nature]
+discussion = ["linuxdo", "hackernews"]      # 分享/讨论 → 2d
+longform   = ["ruanyifeng", "anywayfm"]     # 不定期长文 → 不参与分类
+```
+
+| 值 | 含义 | 参与分类 | 页面位置 |
+|---|---|---|---|
+| `news` | 新闻（默认） | 2c | 自己的面板 + 汇总页的「分类」段 |
+| `discussion` | 分享 / 讨论 | 2d | 自己的面板 + 汇总页的「讨论」段 |
+| `longform` | 不定期更新的长文 | **不参与** | 只保留自己的面板 |
+
+`[sources.units]` 处理一个源内部不一致的情况（Telegram 的 18 个频道分属三种性质，linux.do 的「站外速览」是转载新闻）：
+
+```toml
+[sources.units]
+"telegram:reorx_share" = "discussion"
+"telegram:wxbyg"       = "longform"
+"linuxdo:站外速览"      = "news"
+```
+
+没列到的单元跟随其源，所以只需要写例外。配置写错会在启动时报错退出，不会静默回落。
 
 ### `[output]` / `[archive]` / `[paths]`
 
@@ -284,7 +311,7 @@ make archive DAY=2026-10-12  # 指定快照名
                     │  阶段 1 · 采集                            │
                     │  tools/collect.py + collectors/          │
                     │                                          │
-  10 个信源  ──────▶ │  HTTP 抓取 → 归一化 → 时间戳 → 去重        │
+  11 个信源  ──────▶ │  HTTP 抓取 → 归一化 → 时间戳 → 去重        │
                     │                                          │
                     └──────────────┬───────────────────────────┘
                                    │  data/collected/*.json   （原始，永不改写）
@@ -294,6 +321,7 @@ make archive DAY=2026-10-12  # 指定快照名
                     │  tools/ai_apply.py + ai_stage.py          │
                     │                                          │
                     │  2a Telegram 去重/合并/删广告              │
+                    │  2c/2d 分类（新闻侧 / 讨论侧，并行）         │
                     │  2b 全量重要性提取（不删条目）              │
                     │                                          │
                     │  模型只输出「决策」→ 脚本校验 → 应用         │
@@ -383,12 +411,12 @@ tools/collectors/
 
 `make ab` 会用两个引擎各跑一遍，`tools/compare_engines.py` 生成差异报告——它能区分**真差异**和两类噪声（抓取时刻不同、实时榜单漂移）。
 
-### 10 个信源各自怎么抓
+### 11 个信源各自怎么抓
 
 | 源 | 方式 | 关键点 |
 |---|---|---|
 | **少数派** | RSS + v1 API 兜底 | 只在 feed 条数不足时调 API；全文只抓「派早报」 |
-| **Telegram** | `t.me/s/<channel>` 公开预览 | **唯一真正的通用适配器**：7 个频道共用一套解析，无 API key、无登录 |
+| **Telegram** | `t.me/s/<channel>` 公开预览 | **唯一真正的通用适配器**：18 个频道共用一套解析，无 API key、无登录 |
 | **linux.do** | 晚报页分节 | 一个页面多个 `<section>`，每节独立成块 |
 | **晚点** | POST `/site/index` | 需 `X-Requested-With`；**证书链不完整**，走 `RELAXED_TLS` |
 | **极客公园** | RSS | 正文用通用抽取；链接 `http→https` 修正 |
@@ -428,7 +456,7 @@ Telegram 一条消息里可能有**两个** text div：引用的原消息（`js-
 
 好处：**可审计**（决策是数据，可 diff）、**可回滚**（原始数据没动过）、**幂等**（重复应用结果相同）、**安全**（非法决策被拒绝而不是执行）。
 
-### 两个子阶段
+### 四个子阶段
 
 **2a · Telegram 去重合并**（`prompts/telegram_merge.md`）
 
@@ -444,13 +472,44 @@ Telegram 一条消息里可能有**两个** text div：引用的原消息（`js-
 
 合并会保留 `originals[]`（含原文和链接），前端有浮层可展开核对——**不丢失任何原始信息**。
 
+**2c / 2d · 分类**（`prompts/classify.md`）
+
+同一个提示词、同一套校验、同一套应用逻辑，跑在按 `nature` 切开的两半数据上：
+
+| 子阶段 | 输入 | 内容 |
+|---|---|---|
+| 2c | `classify_input.json` | `news` 侧：新闻源 + 新闻频道 |
+| 2d | `classify_forum_input.json` | `discussion` 侧：Hacker News、linux.do、分享频道 |
+
+`longform`（阮一峰、Anyway、微信搬运工、知乎大巴扎）**两边都不进**——不定期更新的长文不是某一天的要闻。
+
+- 类目名由模型自由命名，脚本不管；**跨天不可比是有意为之**，每天只有数量上的差别
+- 输入每条只给 `title` + `summary`（≤ 400 字），**不含 `body_text`**，所以比 2b 便宜十倍左右
+- 两次调用并行发出（`generate` 是同步 `subprocess.run`，释放 GIL），耗时约等于较慢的那一次
+- 结果写独立的 `data/processed/categories.json`：分类失败不连带丢掉头条，反之亦然
+
+脚本对模型给的分类强制执行形状规则（非法项拒绝并报告，不猜测执行）：
+
+| 情况 | 处理 |
+|---|---|
+| id 不存在 / 属于另一半 | 拒绝 |
+| 同一条被多个类目收下 | 只保留首次 |
+| 同名类目出现两次 | 合并为一个 |
+| `summary` 超过 60 字 | 截断 |
+| 类目数超过 12 | 按条数保留前 12，其余并入「其他」 |
+| 类目少于 2 条 | 并入「其他」 |
+| 未被任何类目收下 | 脚本兜底进「其他」 |
+
+所以每个类目块**覆盖整天**：已归类 218/220 会直接印在页面上。
+
 **2b · 全量重要性提取**（`prompts/digest_highlights.md`）
 
-输入是**全部 10 个源**的条目（约 240 条），输出要闻排序 + 每日脉络。
+输入是**全部 11 个源**的条目，输出要闻排序。
 
 - 双信号判断重要性：**A 交叉印证**（多源报道同一事）/ **B 内在重要性**（单一权威来源的重大事件）
 - **不删除任何条目**，只在顶部叠加一个「今日汇总」面板
 - 服务端按 `importance` **重新排序**并丢弃模型给的 `rank`（顺序由脚本决定）
+- 输入带上了 2c/2d 已经分好的 `category`，但头条是**事件**不是类目：同一个事件可以跨多个类目
 
 ### 校验层（`ai_stage.py`）
 
@@ -509,12 +568,16 @@ BACKEND_TABLE = {
 ### 面板构成
 
 ```
-今日汇总    ← AI 要闻 + 每日脉络（AI=none 时此面板消失）
-少数派 / Telegram / linux.do / 晚点 / 极客公园 /
+今日汇总    ← 今日头条 + 分类 + 讨论（三块，任一有内容即出现）
+少数派 / Telegram / linux.do / 晚点 / 极客公园 / 奇客 Solidot /
 阮一峰 / Anyway.Now / Hacker News / 微博热搜 / 知乎热榜
 ```
 
 顺序与名称来自 `config.toml` 的 `sources.order` / `sources.labels`。
+
+「今日汇总」里的每条都带一个引用 chip（`@zaihuapd ↗` / `少数派 ↗`），点一下跳到它所在面板里的那一条并高亮。chip 只显示源名不带序号，所以同源的两条引用看起来一样——识别靠点击后的高亮。
+
+深链也支持：`site/digest.html#p-sspai/it-<id>` 会直接落到那一条。
 
 ---
 
@@ -590,7 +653,7 @@ archive/
 - **`defaults()` 就是 schema**：它同时是默认值、校验依据、`--show-config` 的渲染源
 - **未知键报错**：配置文件的拼写错误必须响亮地失败，而不是静默保留旧值
 - **`--show-config`** 输出合法 TOML + 每行来源标注，可 diff
-- **开放表**：`sources.limits` / `sources.labels` 的键是源名，允许自由键（配置新增的 feed 也要能设标签），但**值的类型仍校验**
+- **开放表**：`sources.limits` / `sources.labels` / `sources.units` 的键是源名或「源:单元」，允许自由键（配置新增的 feed 也要能设标签），但**值的类型仍校验**
 
 ---
 
@@ -621,7 +684,7 @@ url = "https://example.com/feed.xml"
 ## 8. 测试与验证
 
 ```bash
-make test      # 63 项离线测试，不联网、不调模型
+make test      # 离线测试，不联网、不调模型
 ```
 
 覆盖：采集解析（Telegram 引用块、图片路径、日期选择）、TLS 校验未被削弱、归档原子替换与版本命名、**跨天决策复用校验**、AI 决策校验、渲染器报告、配置优先级与校验、后端命令形状、模型溯源覆盖。
@@ -672,6 +735,7 @@ tools/
 
 prompts/
   telegram_merge.md       阶段 2a 提示词
+  classify.md             阶段 2c / 2d 提示词
   digest_highlights.md    阶段 2b 提示词
 
 site/digest.html          产物（单文件，零外部请求）

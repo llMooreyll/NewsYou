@@ -70,6 +70,53 @@ def _source_kwargs(name: str, args) -> dict:
         kwargs["feed"] = args.hn_feed
     return kwargs
 
+def _nature_maps(cfg) -> tuple[dict, dict]:
+    """(source -> nature, "source:unit" -> nature) from the configuration."""
+    source_nature: dict[str, str] = {}
+    for nature, names in (cfg.get("sources.nature") or {}).items():
+        for name in names or []:
+            source_nature[str(name)] = str(nature)
+    unit_nature = {str(k): str(v) for k, v in (cfg.get("sources.units") or {}).items()}
+    return source_nature, unit_nature
+
+def _stamp_identity(name: str, items: list[dict], source_nature: dict,
+                    unit_nature: dict) -> None:
+    """Give every item its stable id and its nature, in place.
+
+    Stamped after _postprocess() rather than before: dedupe() drops duplicates,
+    and a dropped item should not have consumed an id.
+
+    Two items of one source can still collide. dedupe() keys on title+summary
+    while the id keys on the canonical URL, so the same URL under two different
+    titles survives as two items with one id. The second gets a `-2` suffix and
+    a warning, because a shared id would make every citation ambiguous and
+    silently break the jump.
+    """
+    seen: dict[str, int] = {}
+    units_seen: set = set()
+    field = registry.UNIT_FIELD.get(name, "")
+    for entry in items:
+        key = ai_stage.item_id(entry)
+        count = seen.get(key, 0) + 1
+        seen[key] = count
+        if count > 1:
+            print(f"  ! {name}: duplicate id {key}; renaming to {key}-{count}",
+                  file=sys.stderr)
+            key = f"{key}-{count}"
+        entry["id"] = key
+        unit = (entry.get("extra") or {}).get(field) if field else None
+        units_seen.add(unit)
+        entry["nature"] = registry.source_nature_of(
+            name, unit, source_nature=source_nature, unit_nature=unit_nature)
+
+    # A linux.do section name comes from the page, so a typo in sources.units is
+    # invisible at configuration time. Saying so here is the only chance.
+    wanted = {k.split(":", 1)[1] for k in unit_nature if k.startswith(f"{name}:")}
+    unmatched = sorted(wanted - units_seen)
+    if unmatched:
+        print(f"  ! {name}: sources.units names no item matched: {', '.join(unmatched)}",
+              file=sys.stderr)
+
 def _postprocess(name: str, items: list[dict], args, outdir: Path) -> list[dict]:
     """Telegram-only: deterministic pre-dedupe plus image download."""
     if name != "telegram":
@@ -144,6 +191,7 @@ def main() -> int:
     args.outdir = Path(cfg.get("paths.collected"))
     args.aidir = Path(cfg.get("paths.ai"))
     args.channels = list(cfg.get("telegram.channels") or [])
+    args.source_nature, args.unit_nature = _nature_maps(cfg)
     args.hn_feed = cfg.get("hackernews.feed")
     args.limits = dict(cfg.get("sources.limits") or {})
     args.labels = dict(cfg.get("sources.labels") or {})
@@ -223,6 +271,7 @@ def main() -> int:
                 base.stamp_now(entry)
             base.mark_today(items, today)
             items = _postprocess(name, items, args, args.outdir)
+            _stamp_identity(name, items, args.source_nature, args.unit_nature)
 
             results[name] = items
             statuses[name] = base.source_status(items, today)

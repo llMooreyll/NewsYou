@@ -8,7 +8,7 @@ shows what stage 2 produces without anyone needing to call a model first.
 The selection is **derived from the data**, not from hardcoded keywords: a
 hardcoded list silently degrades to "0 highlights" the moment the day's messages
 change. Merges come from cross-channel keyword overlap, highlights from a simple
-interest score, and themes from the clusters those produce.
+interest score, and categories from the sources the items came from.
 
 Real usage replaces these with actual model output.
 
@@ -139,24 +139,45 @@ def build_highlights(entries: list[dict], id_of, merges: list[dict]) -> list[dic
         })
     return highlights
 
-def build_themes(highlights: list[dict], merges: list[dict]) -> list[dict]:
-    """Cluster highlights by shared keywords into a couple of named themes."""
-    if len(highlights) < 2:
-        return []
-    themes = []
-    if merges:
-        themes.append({
-            "name": "跨频道重复报道",
-            "summary": f"{len(merges)} 组消息由不同频道重复报道，已合并并保留原文。",
-            "item_ids": [m for a in merges for m in ([a["primary_id"]] + a["merge_ids"])],
-        })
-    if len(highlights) >= 3:
-        themes.append({
-            "name": "当日主要议题",
-            "summary": "按篇幅与热度排序，覆盖科技、产业与政策等方向。",
-            "item_ids": [h["item_ids"][0] for h in highlights[:3]],
-        })
-    return themes
+def load_items(collected: Path) -> dict[str, list[dict]]:
+    """Every collected source, not just Telegram: the classification covers the
+    whole day, so the example has to as well."""
+    out: dict[str, list[dict]] = {}
+    for path in sorted(collected.glob("*.json")):
+        if path.name in ("index.json", "telegram_duplicate_groups.json"):
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and "items" in payload:
+            out[path.stem] = payload["items"]
+    return out
+
+def build_categories(sources: dict[str, list[dict]], side: str, id_of,
+                     skip: set[str]) -> list[dict]:
+    """Bucket one side by where its items came from.
+
+    This is not a model answer and does not pretend to be one. It exists so the
+    shipped example has the right shape, and so `make demo` exercises the same
+    validator, shape rules and applier that real output goes through.
+
+    `skip` holds the ids a merge absorbed: they are no longer top-level items,
+    so a category naming one would be rejected.
+    """
+    buckets: dict[str, list[str]] = {}
+    for name in ai_stage.source_order(sources):
+        for entry in sources[name]:
+            key = id_of(entry)
+            if key in skip or (entry.get("nature") or "news") != side:
+                continue
+            extra = entry.get("extra") or {}
+            label = ("@" + str(extra["channel"])) if extra.get("channel") else (
+                entry.get("source_name") or entry.get("source") or "其他")
+            buckets.setdefault(label, []).append(key)
+    return [{"name": name, "summary": f"{len(ids)} 条来自 {name}", "item_ids": ids}
+            for name, ids in sorted(buckets.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+            if len(ids) >= ai_stage.CATEGORY_MIN_ITEMS]
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate demo stage-2 decision files.")
@@ -171,6 +192,7 @@ def main() -> int:
         return 1
 
     entries = json.loads(path.read_text(encoding="utf-8"))["items"]
+    sources = load_items(collected)
     index = json.loads((collected / "index.json").read_text(encoding="utf-8"))
     day = index.get("day", "")
     engine = index.get("engine", "legacy")
@@ -180,9 +202,21 @@ def main() -> int:
 
     merges = build_merges(entries, id_of)
     highlights = build_highlights(entries, id_of, merges)
-    themes = build_themes(highlights, merges)
-
+    # a merge member is not a top-level item any more, so no category may name it
+    absorbed = {m for action in merges for m in action["merge_ids"]}
     aidir.mkdir(parents=True, exist_ok=True)
+
+    for side, stem in ai_stage.CLASSIFY_SIDES:
+        categories = build_categories(sources, side, id_of, absorbed)
+        (aidir / f"{stem}_decisions.json").write_text(json.dumps({
+            "schema": ai_stage.CLASSIFY_SCHEMA,
+            "day": day,
+            "model": MODEL_NOTE,
+            "nature": side,
+            "categories": categories,
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"wrote {aidir}/{stem}_decisions.json ({len(categories)} categories)")
+
     (aidir / "telegram_decisions.json").write_text(json.dumps({
         "schema": ai_stage.TELEGRAM_SCHEMA,
         "day": day,
@@ -197,13 +231,12 @@ def main() -> int:
         "model": MODEL_NOTE,
         "headline": (highlights[0]["title"][:60] + "…") if highlights else "当日无显著要闻。",
         "highlights": highlights,
-        "themes": themes,
         "stats_note": (f"{len(channels)} 个频道当日共 {len(entries)} 条消息，"
                        f"其中 {len(merges)} 组为跨频道重复并已合并。引擎：{engine}。"),
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     print(f"wrote {aidir}/telegram_decisions.json ({len(merges)} actions)")
-    print(f"wrote {aidir}/digest_decisions.json ({len(highlights)} highlights, {len(themes)} themes)")
+    print(f"wrote {aidir}/digest_decisions.json ({len(highlights)} highlights)")
     return 0
 
 if __name__ == "__main__":

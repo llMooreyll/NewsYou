@@ -11,10 +11,16 @@ Why not let the model rewrite the data directly:
 - safe       — the model cannot corrupt fields it was not asked to change
 - testable   — apply/validate run without any model, so the pipeline works today
 
-Two sub-stages:
+Four sub-stages:
 
-  2a  telegram_input.json  ->  telegram_decisions.json   (drop / merge)
-  2b  digest_input.json    ->  digest_decisions.json     (rank / brief, no delete)
+  2a  telegram_input.json  ->  telegram_decisions.json       (drop / merge)
+  2c  classify_input.json  ->  classify_decisions.json       (news categories)
+  2d  classify_forum_input.json -> classify_forum_decisions.json (discussion)
+  2b  digest_input.json    ->  digest_decisions.json         (rank / brief, no delete)
+
+2c and 2d are the same call on two slices of the data, split by each item's
+`nature`; `longform` items take part in none of them. 2b runs last because its
+input carries the `category` the classification produced.
 
 Pure functions only. File IO lives in tools/ai_apply.py and tools/collect.py.
 """
@@ -43,6 +49,25 @@ TELEGRAM_SCHEMA = "newsletter.telegram-decisions/1"
 DIGEST_SCHEMA = "newsletter.digest-decisions/1"
 TELEGRAM_INPUT_SCHEMA = "newsletter.telegram-input/1"
 DIGEST_INPUT_SCHEMA = "newsletter.digest-input/1"
+CLASSIFY_SCHEMA = "newsletter.classify-decisions/1"
+CLASSIFY_INPUT_SCHEMA = "newsletter.classify-input/1"
+CATEGORIES_SCHEMA = "newsletter.categories/1"
+
+# Stages 2c (news) and 2d (discussion) are the same call on a different slice
+# of the data: same prompt, same validator, same applier, told apart only by the
+# `nature` they are handed. That is why this is a table and not two code paths.
+# The value is the file-name stem, so the input and the decisions for a side are
+# `<stem>_input.json` and `<stem>_decisions.json`.
+CLASSIFY_SIDES = (("news", "classify"), ("discussion", "classify_forum"))
+
+# Shape rules for one side's categories. The model names them freely, so these
+# are what keep a day's page readable when the model returns forty buckets.
+CATEGORY_LIMIT = 12          # named categories per side; the fallback is extra
+CATEGORY_MIN_ITEMS = 2       # a smaller category folds into the fallback
+CATEGORY_FALLBACK = "其他"
+CATEGORY_NAME_LIMIT = 40
+CATEGORY_SUMMARY_LIMIT = 60
+CLASSIFY_SUMMARY_LIMIT = 400
 
 
 def load_prompt(name: str) -> str:
@@ -134,7 +159,13 @@ def item_id(entry: dict) -> str:
     Telegram keeps its channel/message identity so a human can find the post.
     Everything else is keyed by its canonical URL: a title hash collided when
     two items shared a title and changed whenever a title was edited.
+
+    Stage 1 stamps the result as `id` on every collected item. Preferring that
+    value keeps one derivation in the pipeline: without it this function and
+    the stamp could drift and every citation would point at nothing.
     """
+    if entry.get("id"):
+        return str(entry["id"])
     extra = entry.get("extra") or {}
     if entry.get("source") == "telegram" and extra.get("message_id") is not None:
         return f"telegram:{extra.get('channel')}:{extra.get('message_id')}"
@@ -157,6 +188,8 @@ def slim_item(entry: dict) -> dict:
         "id": item_id(entry),
         "source": entry.get("source"),
         "source_name": entry.get("source_name"),
+        "nature": entry.get("nature"),
+        "category": entry.get("category"),
         "title": entry.get("title"),
         "summary": (entry.get("summary") or "")[:4000],
         "body_text": entry.get("body_text"),
@@ -233,10 +266,71 @@ def build_digest_input(results: dict[str, list[dict]], statuses: dict[str, dict]
                 "summary": "string", "topics": ["string"], "importance": "number 0-100",
                 "why": "string",
             }],
-            "themes": [{"name": "string", "summary": "string", "item_ids": ["string"]}],
             "stats_note": "string",
         },
         "sources": sources,
+    }
+
+# --------------------------------------------------------------------------
+# Stage 2c / 2d input
+# --------------------------------------------------------------------------
+
+def classify_groups(results: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """Split the items by nature, in panel order.
+
+    `longform` is deliberately not a group: those sources are irregularly
+    updated long reads, so they keep their own panel and get no category. An
+    item with no stamped nature counts as news — which is also what a data set
+    collected before the field existed looks like.
+    """
+    groups: dict[str, list[dict]] = {side: [] for side, _ in CLASSIFY_SIDES}
+    for name in source_order(results):
+        for entry in results[name]:
+            nature = entry.get("nature") or "news"
+            if nature in groups:
+                groups[nature].append(entry)
+    return groups
+
+def slim_classify_item(entry: dict) -> dict:
+    """The projection for stage 2c/2d.
+
+    No `body_text`: classification reads the headline and the excerpt, and
+    leaving the article out is what makes this call roughly ten times cheaper
+    than stage 2b.
+    """
+    extra = entry.get("extra") or {}
+    return {
+        "id": item_id(entry),
+        "nature": entry.get("nature") or "news",
+        "source": entry.get("source"),
+        "source_name": entry.get("source_name"),
+        "title": entry.get("title"),
+        "summary": (entry.get("summary") or "")[:CLASSIFY_SUMMARY_LIMIT],
+        "url": entry.get("url"),
+        "channel": extra.get("channel"),
+        "section_name": extra.get("section_name"),
+    }
+
+def build_classify_input(items: list[dict], day: str, nature: str) -> dict:
+    return {
+        "schema": CLASSIFY_INPUT_SCHEMA,
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "day": day,
+        "nature": nature,
+        "item_count": len(items),
+        "instructions": load_prompt("classify"),
+        "response_schema": {
+            "schema": CLASSIFY_SCHEMA,
+            "day": day,
+            "model": "string",
+            "nature": nature,
+            "categories": [{
+                "name": "string, 中文, at most 6 characters",
+                "summary": "string, one clause, at most 60 characters",
+                "item_ids": ["string"],
+            }],
+        },
+        "items": [slim_classify_item(e) for e in items],
     }
 
 
@@ -445,35 +539,12 @@ def validate_digest_decisions(decisions: dict, known_ids: set[str],
         problems.append(f"highlights trimmed from {len(highlights)} to 10")
         highlights = highlights[:10]
 
-    themes: list[dict] = []
-    for index, theme in enumerate(decisions.get("themes") or []):
-        if not isinstance(theme, dict):
-            continue
-        name = _clean_text(theme.get("name"), 120)
-        if not name:
-            continue
-        ids: list[str] = []
-        for ref in (theme.get("item_ids") or []):
-            if not isinstance(ref, str):
-                continue
-            target = resolve(ref)
-            if target and target not in ids:
-                ids.append(target)
-        themes.append({
-            "name": name,
-            "summary": _clean_text(theme.get("summary"), 600),
-            "item_ids": ids,
-        })
-    if len(themes) > 5:
-        themes = themes[:5]
-
     return {
         "schema": DIGEST_SCHEMA,
         "day": decisions.get("day"),
         "model": _clean_text(decisions.get("model"), 120),
         "headline": _clean_text(decisions.get("headline"), 400),
         "highlights": highlights,
-        "themes": themes,
         "stats_note": _clean_text(decisions.get("stats_note"), 300),
     }, problems
 
@@ -617,22 +688,6 @@ def apply_digest_decisions(digest: dict, item_index: dict[str, dict]) -> dict:
             })
         cards.append({**highlight, "refs": refs})
 
-    themes = []
-    for theme in digest.get("themes") or []:
-        themes.append({
-            "name": theme["name"],
-            "summary": theme["summary"],
-            "refs": [
-                {
-                    "id": ref,
-                    "source": (item_index.get(ref) or {}).get("source"),
-                    "title": (item_index.get(ref) or {}).get("title"),
-                    "url": (item_index.get(ref) or {}).get("url"),
-                }
-                for ref in theme["item_ids"] if ref in item_index
-            ],
-        })
-
     return {
         "schema": digest.get("schema"),
         "day": digest.get("day"),
@@ -640,8 +695,151 @@ def apply_digest_decisions(digest: dict, item_index: dict[str, dict]) -> dict:
         "headline": digest.get("headline"),
         "stats_note": digest.get("stats_note"),
         "cards": cards,
-        "themes": themes,
     }
+
+# --------------------------------------------------------------------------
+# Stage 2c / 2d validation and apply
+# --------------------------------------------------------------------------
+
+def validate_classify_decisions(decisions: dict, nature: str,
+                                item_index: dict[str, dict]) -> tuple[list[dict], list[str]]:
+    """Return (accepted categories, problems). Never raises on bad input.
+
+    The model proposes groupings; this decides which are usable. Two rules
+    carry most of the weight. A reference has to resolve, and it has to belong
+    to the side being classified: a news id inside the discussion file would
+    otherwise file a news item under a community heading. And an item belongs
+    to exactly one category, so the first claim wins and later ones are
+    rejected instead of appearing twice under two names.
+    """
+    problems: list[str] = []
+    if not isinstance(decisions, dict):
+        return [], ["decisions file is not a JSON object"]
+    if decisions.get("schema") not in (None, CLASSIFY_SCHEMA):
+        problems.append(f"unexpected schema {decisions.get('schema')!r}")
+
+    claimed: set[str] = set()
+    by_name: dict[str, dict] = {}
+    for index, category in enumerate(decisions.get("categories") or []):
+        if not isinstance(category, dict):
+            problems.append(f"category {index}: not an object")
+            continue
+        name = _clean_text(category.get("name"), CATEGORY_NAME_LIMIT)
+        if not name:
+            problems.append(f"category {index}: missing name, skipped")
+            continue
+        ids: list[str] = []
+        for ref in category.get("item_ids") or []:
+            if not isinstance(ref, str):
+                problems.append(f"category {index} ({name}): id is not a string")
+                continue
+            entry = item_index.get(ref)
+            if entry is None:
+                problems.append(f"category {index} ({name}): unknown id {ref!r}")
+                continue
+            entry_nature = entry.get("nature") or "news"
+            if entry_nature != nature:
+                problems.append(f"category {index} ({name}): {ref} is "
+                                f"{entry_nature}, not {nature}")
+                continue
+            if ref in claimed:
+                problems.append(f"category {index} ({name}): {ref} already categorised")
+                continue
+            claimed.add(ref)
+            ids.append(ref)
+        if not ids:
+            problems.append(f"category {index} ({name}): no usable item_ids, skipped")
+            continue
+        if name in by_name:
+            # One label, one block: two identically titled sections would look
+            # like a bug in the page rather than a mistake in the answer.
+            by_name[name]["item_ids"] += ids
+            problems.append(f"category {index}: {name!r} appears twice; merged")
+            continue
+        by_name[name] = {
+            "name": name,
+            "summary": _clean_text(category.get("summary"), 200)[:CATEGORY_SUMMARY_LIMIT],
+            "item_ids": ids,
+        }
+    return list(by_name.values()), problems
+
+def finalize_categories(categories: list[dict], items: list[dict],
+                        nature: str) -> tuple[list[dict], list[str]]:
+    """Enforce the shape rules and account for every item of the side.
+
+    Named categories are ordered by size, because that is also the anchor order
+    the page uses. Anything below CATEGORY_MIN_ITEMS, anything past
+    CATEGORY_LIMIT, and every item the model never placed ends up in the
+    fallback bucket rather than being dropped: the block then covers the whole
+    side, and "the model missed it" is distinguishable from "it is filed under
+    其他".
+    """
+    problems: list[str] = []
+    ordered = sorted(categories, key=lambda c: (-len(c["item_ids"]), c["name"]))
+    kept = [c for c in ordered if len(c["item_ids"]) >= CATEGORY_MIN_ITEMS]
+    folded = len(ordered) - len(kept)
+    if len(kept) > CATEGORY_LIMIT:
+        problems.append(f"categories trimmed from {len(kept)} to {CATEGORY_LIMIT}")
+        folded += len(kept) - CATEGORY_LIMIT
+        kept = kept[:CATEGORY_LIMIT]
+
+    placed = {ref for category in kept for ref in category["item_ids"]}
+    leftover = [item_id(e) for e in items
+                if (e.get("nature") or "news") == nature and item_id(e) not in placed]
+    if folded:
+        problems.append(f"{folded} category/ies folded into {CATEGORY_FALLBACK}")
+    if leftover:
+        kept.append({
+            "name": CATEGORY_FALLBACK,
+            "summary": f"其余 {len(leftover)} 条未归入以上类目",
+            "item_ids": leftover,
+        })
+    return kept, problems
+
+def apply_classify_decisions(categories: list[dict], item_index: dict[str, dict],
+                             anchor_start: int = 0) -> list[dict]:
+    """Resolve every referenced id into a render-ready ref.
+
+    Resolved here rather than in the renderer: the page draws one panel, and
+    turning an id into a title and a link would otherwise mean reading every
+    processed source file back in at render time.
+
+    Anchors are `cat-<n>` sequence numbers, not the category name. A Chinese
+    label transliterated into an id would change every day the model picks a
+    slightly different word, and the rail and the sections have to agree.
+    """
+    out: list[dict] = []
+    for offset, category in enumerate(categories, 1):
+        refs = []
+        for ref in category["item_ids"]:
+            entry = item_index.get(ref)
+            if entry is None:
+                continue
+            extra = entry.get("extra") or {}
+            refs.append({
+                "id": ref,
+                "source": entry.get("source"),
+                "source_name": entry.get("source_name"),
+                "channel": extra.get("channel"),
+                "title": entry.get("title"),
+                "url": entry.get("url"),
+            })
+        out.append({
+            "anchor": f"cat-{anchor_start + offset}",
+            "name": category["name"],
+            "summary": category["summary"],
+            "refs": refs,
+        })
+    return out
+
+def has_categories(payload: dict | None) -> bool:
+    """True when at least one side produced a category.
+
+    The renderer keys the 今日汇总 panel on this, so an empty file has to read
+    as "nothing was classified" and not as an empty panel.
+    """
+    sides = (payload or {}).get("sides") or {}
+    return any((side or {}).get("categories") for side in sides.values())
 
 
 def build_item_index(results: dict[str, list[dict]]) -> tuple[dict[str, dict], dict[str, str]]:

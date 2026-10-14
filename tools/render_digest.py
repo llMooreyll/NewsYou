@@ -42,6 +42,7 @@ ROOT = Path(__file__).resolve().parent.parent
 ASSETS = Path(__file__).resolve().parent / "digest_assets"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ai_stage  # noqa: E402
 import config  # noqa: E402
 
 # name -> (tab label, subtitle)
@@ -51,6 +52,7 @@ SOURCE_META = {
     "linuxdo": ("linux.do", "社区晚报"),
     "latepost": ("晚点", "LatePost 深度报道"),
     "geekpark": ("极客公园", "科技资讯"),
+    "solidot": ("奇客 Solidot", "传递最新科技情报"),
     "ruanyifeng": ("阮一峰", "科技爱好者周刊"),
     "anywayfm": ("Anyway.Now", "设计与工具链接"),
     "hackernews": ("Hacker News", "Top stories"),
@@ -206,6 +208,19 @@ def linkify(text: str) -> str:
 def ext(url: str, label: str, cls: str = "") -> str:
     c = f' class="{cls}"' if cls else ""
     return f'<a{c} href="{esc(url)}" target="_blank" rel="noopener noreferrer">{label}</a>'
+
+def item_anchor(entry: dict) -> str:
+    """The DOM id a citation points at.
+
+    Stage 1 stamps `id` on every collected item. Data collected before that
+    field existed has none, so the derivation is repeated here rather than
+    requiring a re-collect just to render a page; both paths agree.
+
+    The id can contain colons (`telegram:zaihuapd:44363`), which is legal in an
+    HTML id but not in a CSS selector — look the element up with
+    getElementById, never with querySelector.
+    """
+    return "it-" + str(entry.get("id") or ai_stage.item_id(entry))
 
 
 # --------------------------------------------------------------------------
@@ -526,9 +541,96 @@ def _ref_name(ref: dict) -> str:
     return ref.get("source_name") or SOURCE_META.get(ref.get("source") or "", (ref.get("source") or "",))[0]
 
 
-def render_digest_panel(digest: dict) -> str:
+def _cite(ref: dict) -> str:
+    """A citation chip that moves the page rather than opening a tab.
+
+    The digest panel is a view over items that live in other panels, so the
+    useful action is a jump, not a link out. One chip per item: a source cited
+    twice shows twice, which is the point when each chip lands somewhere else.
+
+    `href` keeps it usable with no JS; the script intercepts the click, because
+    boot reads location.hash as a tab key and an item id in there would send a
+    reload to the wrong place.
+    """
+    key = ref.get("id")
+    name = _ref_name(ref)
+    if not key or not name:
+        return ""
+    key = str(key)
+    return (f'<a class="cite" href="#it-{esc(key)}" data-jump="{esc(key)}" '
+            f'title="{esc(ref.get("title") or name)}">{esc(name)} ↗</a>')
+
+def _cites(refs) -> str:
+    """One chip per distinct item, in the order given."""
+    out, seen = [], set()
+    for ref in refs or []:
+        key = str(ref.get("id") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        chip = _cite(ref)
+        if chip:
+            out.append(chip)
+    return "".join(out)
+
+def _category_sections(categories: list[dict]) -> str:
+    """One section per category: a heading, its summary line, then its items.
+
+    These rows carry no `it-` anchor of their own. Those ids belong to the
+    source panels, and an id may appear only once in a document — the chip here
+    is what points at the item, not the row it sits in.
+    """
+    out = []
+    for category in categories or []:
+        refs = category.get("refs") or []
+        rows = "".join(
+            f'<li class="tp rv" style="--i:{i}">'
+            f'<h3 class="tp-t">{ext(ref.get("url"), esc(ref.get("title")))}</h3>'
+            f'<div class="cat-r">{_cite(ref)}</div></li>'
+            for i, ref in enumerate(refs, 1))
+        out.append(
+            f'<section class="sec" id="{esc(category.get("anchor"))}">'
+            f'<h2 class="sec-h">{esc(category.get("name"))}'
+            f'<span class="n">{len(refs)}</span></h2>'
+            + (f'<p class="cat-s">{esc(category.get("summary"))}</p>'
+               if category.get("summary") else "")
+            + f'<ol class="topics">{rows}</ol></section>')
+    return "".join(out)
+
+def _side_section(anchor: str, heading: str, side: dict) -> str:
+    """The 分类 or 讨论 block: one heading, then one section per category.
+
+    The coverage line is deliberate: a category list that quietly accounts for
+    half the day looks like one that accounts for all of it, and the difference
+    is what tells the reader whether the grouping was any good.
+    """
+    categories = (side or {}).get("categories") or []
+    if not categories:
+        return ""
+    total = (side or {}).get("item_count") or 0
+    classified = (side or {}).get("classified") or 0
+    aside = f'<span class="aside">已归类 {classified}/{total}</span>' if total else ""
+    return (f'<section class="sec" id="{esc(anchor)}">'
+            f'<h2 class="sec-h">{esc(heading)}'
+            f'<span class="n">{len(categories)}</span>{aside}</h2>'
+            + _category_sections(categories) + "</section>")
+
+def render_digest_panel(digest: dict | None, categories: dict | None = None) -> str:
+    """今日汇总: the briefing, then the news categories, then discussion.
+
+    The two inputs come from different files and either may be missing. A
+    classification that failed must not cost the briefing, and a briefing that
+    failed must not cost the categories, so neither is a precondition for the
+    other.
+    """
+    digest = digest or {}
     cards = digest.get("cards") or []
-    if not cards:
+    sides = (categories or {}).get("sides") or {}
+    news = sides.get("news") or {}
+    discussion = sides.get("discussion") or {}
+    news_cats = news.get("categories") or []
+    disc_cats = discussion.get("categories") or []
+    if not cards and not news_cats and not disc_cats:
         return '<p class="empty">今日无汇总条目</p>'
 
     def topics(items) -> str:
@@ -544,17 +646,18 @@ def render_digest_panel(digest: dict) -> str:
             out.append(ext(ref.get("url"), esc(name) + " ↗"))
         return "".join(out)
 
-    lead, rest = cards[0], cards[1:]
-    secs = []
-    lead_html = (f'<article class="dg-lead rv" style="--i:1"><div class="no">01 · 头条</div>'
-                 f'<h2>{esc(lead.get("title"))}</h2>'
-                 + ("".join(f"<p>{esc(x)}</p>" for x in re.split(r"\n\s*\n", lead.get("summary") or "") if x.strip())
-                    if lead.get("summary") and lead.get("summary") != lead.get("title") else "")
-                 + f'<div class="dg-m">{topics(lead.get("topics"))}'
-                 + (f'<span>{esc(lead.get("why"))}</span>' if lead.get("why") else "")
-                 + f'<span>重要度 {esc(lead.get("importance"))}</span>{refs(lead.get("refs"))}</div></article>')
-    head = f'<p class="dg-hl rv">{esc(digest.get("headline"))}</p>' if digest.get("headline") else ""
-    secs.append(f'<section class="sec" id="dg-lead">{head}{lead_html}</section>')
+    lead, rest = (cards[0], cards[1:]) if cards else ({}, [])
+    secs: list[str] = []
+    if cards:
+        lead_html = (f'<article class="dg-lead rv" style="--i:1"><div class="no">01 · 头条</div>'
+                     f'<h2>{esc(lead.get("title"))}</h2>'
+                     + ("".join(f"<p>{esc(x)}</p>" for x in re.split(r"\n\s*\n", lead.get("summary") or "") if x.strip())
+                        if lead.get("summary") and lead.get("summary") != lead.get("title") else "")
+                     + f'<div class="dg-m">{topics(lead.get("topics"))}'
+                     + (f'<span>{esc(lead.get("why"))}</span>' if lead.get("why") else "")
+                     + f'<span>重要度 {esc(lead.get("importance"))}</span>{_cites(lead.get("refs"))}</div></article>')
+        head = f'<p class="dg-hl rv">{esc(digest.get("headline"))}</p>' if digest.get("headline") else ""
+        secs.append(f'<section class="sec" id="dg-lead">{head}{lead_html}</section>')
 
     if rest:
         rows = "".join(
@@ -563,21 +666,16 @@ def render_digest_panel(digest: dict) -> str:
             + (f'<p>{esc(re.sub(r"\s+", " ", c.get("summary") or ""))}</p>' if c.get("summary") and c.get("summary") != c.get("title") else "")
             + f'<div class="dg-m">{topics(c.get("topics"))}'
             + (f'<span>{esc(c.get("why"))}</span>' if c.get("why") else "")
-            + f'{refs(c.get("refs"))}</div></div>'
+            + f'{_cites(c.get("refs"))}</div></div>'
             f'<div class="sc">{esc(c.get("importance"))}</div></article>'
             for i, c in enumerate(rest)
         )
         secs.append(f'<section class="sec" id="dg-items"><h2 class="sec-h">要点<span class="n">{len(rest)}</span></h2>{rows}</section>')
 
-    themes = digest.get("themes") or []
-    if themes:
-        cells = "".join(
-            f'<div class="th"><div class="th-n">{esc(t.get("name"))}</div>'
-            f'<p class="th-s">{esc(t.get("summary"))}</p>'
-            f'<div class="th-r">{refs(t.get("refs"))}</div></div>' for t in themes
-        )
-        secs.append(f'<section class="sec" id="dg-themes"><h2 class="sec-h">脉络<span class="n">{len(themes)}</span></h2>'
-                    f'<div class="dg-th">{cells}</div></section>')
+    for anchor, heading, side in (("dg-cats", "分类", news), ("dg-disc", "讨论", discussion)):
+        block = _side_section(anchor, heading, side)
+        if block:
+            secs.append(block)
 
     notes = []
     if digest.get("stats_note"):
@@ -587,11 +685,19 @@ def render_digest_panel(digest: dict) -> str:
     if notes:
         secs.append(f'<p class="dg-note">{"<br>".join(notes)}</p>')
 
-    links = [("dg-lead", "头条", None)]
+    links: list[tuple] = []
+    if cards:
+        links.append(("dg-lead", "头条", None))
     if rest:
         links.append(("dg-items", "要点", len(rest)))
-    if themes:
-        links.append(("dg-themes", "脉络", len(themes)))
+    if news_cats:
+        links.append(("dg-cats", "分类", news.get("classified"),
+                      [(c.get("anchor"), c.get("name"), len(c.get("refs") or []))
+                       for c in news_cats]))
+    if disc_cats:
+        links.append(("dg-disc", "讨论", discussion.get("classified"),
+                      [(c.get("anchor"), c.get("name"), len(c.get("refs") or []))
+                       for c in disc_cats]))
     return with_rail(rail(links, "spy", "本页"), f'<div class="dg">{"".join(secs)}</div>')
 
 
@@ -772,7 +878,7 @@ def _tg_card(entry: dict, index: int, embed: bool, out_dir: Path) -> tuple[str, 
     if merged and extra.get("merged_sources"):
         srcs = '<div class="tg-src"><span>来源</span>' + "".join(
             ext(m.get("url"), "@" + esc(m.get("channel") or "")) for m in extra["merged_sources"]) + "</div>"
-    card = (f'<article class="tg" data-ch="{esc(channel)}">'
+    card = (f'<article class="tg" id="{item_anchor(entry)}" data-ch="{esc(channel)}">'
             f'<div class="tg-h">{ext("https://t.me/" + channel, "@" + esc(channel), "tg-ch")}{ai}'
             f'<time>{esc(fmt_time(entry.get("published_at")))}</time></div>'
             f'{shots}{quote_html}{title}{body}{pill}{tags}{srcs}{cmp_btn}'
@@ -837,7 +943,7 @@ def render_hn_board(items: list[dict]) -> str:
         date, tm = stamp(e)
         when = tm if date == "今天" else date
         rows.append(
-            f'<li class="br rv{" top" if i <= 3 else ""}" style="--i:{i}">'
+            f'<li class="br rv{" top" if i <= 3 else ""}" id="{item_anchor(e)}" style="--i:{i}">'
             f'<span class="br-rk">{i}</span>'
             f'<span class="br-t">{ext(e.get("url"), esc(e.get("title")))}'
             + (f'<span class="br-dom">{esc(dom)}</span>' if dom else "")
@@ -862,7 +968,7 @@ def render_weibo_board(items: list[dict]) -> str:
         cls = "hot" if label in ("沸", "爆") else "new" if label == "新" else ""
         badge = f'<span class="lbl-t {cls}">{esc(label[:1])}</span>' if label else "<span></span>"
         rows.append(
-            f'<li class="br rv{" top" if i <= 3 else ""}" style="--i:{i}">'
+            f'<li class="br rv{" top" if i <= 3 else ""}" id="{item_anchor(e)}" style="--i:{i}">'
             f'<span class="br-rk">{esc(rank)}</span>'
             f'<span class="br-t">{ext(e.get("url"), esc(e.get("title")))}</span>'
             f'{badge}{_bar(v, top)}<span class="br-v">{esc(fmt_heat(v))}</span></li>')
@@ -881,7 +987,7 @@ def render_zhihu_board(items: list[dict]) -> str:
         if re.fullmatch(r"https?://\S+", excerpt):
             excerpt = ""
         rows.append(
-            f'<li class="br rv{" top" if i <= 3 else ""}" style="--i:{i}">'
+            f'<li class="br rv{" top" if i <= 3 else ""}" id="{item_anchor(e)}" style="--i:{i}">'
             f'<span class="br-rk">{esc(x.get("rank") or i)}</span>'
             f'<span class="br-t">{ext(e.get("url"), esc(e.get("title")))}'
             + (f'<span class="br-x" title="{esc(excerpt[:400])}">{esc(excerpt[:160])}</span>' if len(excerpt) > 8 else "")
@@ -926,7 +1032,7 @@ def article_rows(items: list[dict], *, start: int = 0) -> str:
             detail = expander("阅读全文" + (f" · {scope}" if scope else ""), f"{chars} 字",
                               body_fragment(e, _use_rich(e)))
         rows.append(
-            f'<li class="ar rv" style="--i:{start + k + 1}"><div class="ar-d">{dcol}</div><div>'
+            f'<li class="ar rv" id="{item_anchor(e)}" style="--i:{start + k + 1}"><div class="ar-d">{dcol}</div><div>'
             f'<h3 class="ar-t">{ext(e.get("url"), esc(e.get("title")))}</h3>'
             + (f'<p class="ar-s">{esc(summary[:400])}</p>' if summary and not detail else
                f'<p class="ar-s">{esc(summary[:220])}</p>' if summary else "")
@@ -959,7 +1065,7 @@ def render_linuxdo_panel(items: list[dict]) -> str:
         for e in groups[name]:
             k += 1
             s = (e.get("summary") or "").strip()
-            rows.append(f'<li class="tp rv" style="--i:{k}"><h3 class="tp-t">{ext(e.get("url"), esc(e.get("title")))}</h3>'
+            rows.append(f'<li class="tp rv" id="{item_anchor(e)}" style="--i:{k}"><h3 class="tp-t">{ext(e.get("url"), esc(e.get("title")))}</h3>'
                         + (f'<p class="tp-s">{esc(s)}</p>' if s else "") + "</li>")
         secs.append(f'<section class="sec" id="{sid}"><h2 class="sec-h">{esc(name)}<span class="n">{len(groups[name])}</span></h2>'
                     f'<ol class="topics">{"".join(rows)}</ol></section>')
@@ -987,7 +1093,7 @@ def render_sspai_panel(items: list[dict]) -> str:
             rich = _use_rich(e)
             date, tm = stamp(e)
             sections = [s for s in (e.get("sections") or []) if (s.get("text") or s.get("html"))]
-            head = (f'<header class="feat-h rv"><h3>{ext(e.get("url"), esc(e.get("title")))}</h3>'
+            head = (f'<header class="feat-h rv" id="{item_anchor(e)}"><h3>{ext(e.get("url"), esc(e.get("title")))}</h3>'
                     f'<div class="ar-m"><span>{esc(date)} {esc(tm)}</span>'
                     + (f'<span>{esc(e["author"])}</span>' if e.get("author") else "")
                     + f'<span>{len(sections) or 1} 条</span></div></header>')
@@ -1101,8 +1207,17 @@ def absent_panel(info: dict) -> str:
     )
 
 
+def _digest_count(digest: dict | None, categories: dict | None) -> int:
+    """What the 今日汇总 tab counts: highlights when there are any, else the
+    number of categories the classification produced."""
+    cards = (digest or {}).get("cards") or []
+    if cards:
+        return len(cards)
+    return sum(len((side or {}).get("categories") or [])
+               for side in ((categories or {}).get("sides") or {}).values())
+
 def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: bool,
-           absent: dict | None = None) -> str:
+           absent: dict | None = None, categories: dict | None = None) -> str:
     absent = absent or {}
     names = [n for n in ORDER if n in sources] + sorted(n for n in sources if n not in ORDER)
     # A source with no data still gets a tab, so its absence is visible rather
@@ -1129,11 +1244,11 @@ def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: b
                     + "</button>")
         panels.append(f'<section class="panel" role="tabpanel" id="p-{esc(key)}" aria-labelledby="t-{esc(key)}">{body}</section>')
 
-    if digest and digest.get("cards"):
-        model = digest.get("model") or ""
-        add("digest", "今日汇总", len(digest["cards"]), True,
+    if (digest and digest.get("cards")) or ai_stage.has_categories(categories):
+        model = (digest or {}).get("model") or ""
+        add("digest", "今日汇总", _digest_count(digest, categories), True,
             panel_head("今日汇总", "跨源合并与排序" + (f" · {model}" if model else ""), None)
-            + render_digest_panel(digest))
+            + render_digest_panel(digest, categories))
 
     for name in names:
         if name in absent and name not in sources:
@@ -1221,7 +1336,8 @@ def main() -> int:
     indir = args.indir if args.indir.exists() else args.fallback
     sources: dict[str, dict] = {}
     for path in sorted(indir.glob("*.json")):
-        if path.name in ("index.json", "digest.json", "telegram_duplicate_groups.json"):
+        if path.name in ("index.json", "digest.json", "categories.json",
+                         "telegram_duplicate_groups.json"):
             continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1237,6 +1353,19 @@ def main() -> int:
             digest = json.loads(digest_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             digest = None
+
+    # Stage 2c/2d output, kept out of digest.json so a failed classification
+    # cannot cost the briefing and the other way round. An empty file reads as
+    # "nothing was classified", not as an empty panel.
+    categories = None
+    categories_path = indir / "categories.json"
+    if categories_path.exists():
+        try:
+            categories = json.loads(categories_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            categories = None
+    if not ai_stage.has_categories(categories):
+        categories = None
 
     # Sources stage 2 recorded as having produced nothing today. Kept so their
     # tabs can say why instead of silently disappearing.
@@ -1255,12 +1384,13 @@ def main() -> int:
         return 1
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(render(sources, digest, args.output, not args.no_embed, absent),
-                           encoding="utf-8")
+    args.output.write_text(render(sources, digest, args.output, not args.no_embed, absent,
+                                  categories), encoding="utf-8")
     size = args.output.stat().st_size / 1024
+    has_panel = bool(digest and digest.get("cards")) or ai_stage.has_categories(categories)
     print(f"{args.output}  ({size:.0f} KiB, {len(sources)} sources"
           + (f", {len(absent)} absent" if absent else "")
-          + (", digest panel" if digest and digest.get("cards") else "") + ")")
+          + (", digest panel" if has_panel else "") + ")")
     return 0
 
 

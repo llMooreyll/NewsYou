@@ -14,9 +14,16 @@ Flow:
     data/collected/*.json                      raw, never modified
         + data/ai/telegram_decisions.json      optional, stage 2a
         -> data/processed/*.json               merged telegram + passthrough
+        + data/ai/classify_decisions.json      optional, stage 2c (news)
+        + data/ai/classify_forum_decisions.json optional, stage 2d (discussion)
+        -> data/processed/categories.json      the 分类 / 讨论 blocks
         -> data/ai/digest_input.json           stage 2b input (always written)
         + data/ai/digest_decisions.json        optional, stage 2b
         -> data/processed/digest.json          the briefing panel
+
+The per-source files are written after 2c/2d, not after 2a: an item carries the
+`category` it was filed under, and writing it before the classification ran
+would ship a file without one.
 
 Nothing here calls a model. Every decision is checked before it is applied, and
 anything invalid is reported and skipped rather than guessed at.
@@ -26,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -161,8 +169,9 @@ def remove_leftovers(outdir: Path, written: set[str]) -> list[str]:
     copies it whole, so a file left from another day is as good as current: a
     source that dropped out today would keep its old panel, and a day without
     decisions would keep the last briefing. Only this stage's own output is
-    removed — a source file names itself in `source`, the panel has `cards` —
-    so pointing --out at a shared directory cannot cost anything else.
+    removed — a source file names itself in `source`, the panels carry `cards`
+    or `sides` — so pointing --out at a shared directory cannot cost anything
+    else.
     """
     removed: list[str] = []
     for path in sorted(outdir.glob("*.json")):
@@ -172,8 +181,9 @@ def remove_leftovers(outdir: Path, written: set[str]) -> list[str]:
         if not isinstance(payload, dict):
             continue
         is_panel = path.name == "digest.json" and "cards" in payload
+        is_categories = path.name == "categories.json" and "sides" in payload
         is_source = payload.get("source") == path.stem and "items" in payload
-        if is_panel or is_source:
+        if is_panel or is_categories or is_source:
             path.unlink()
             removed.append(path.name)
     return removed
@@ -291,7 +301,111 @@ def main() -> int:
                               "note": "no telegram_decisions.json; raw messages kept"}
         print("telegram: no decisions file, keeping raw messages", file=sys.stderr)
 
+    # ---------------- stage 2c / 2d: classification ----------------
+    # The two sides are the same prompt and the same validator over different
+    # slices of the data, and each is one blocking CLI call. They go out
+    # together: generate() is a subprocess.run, which releases the GIL, so this
+    # is real concurrency and the wall clock is max(), not sum().
+    index_by_id, aliases = ai_stage.build_item_index(processed)
+    groups = ai_stage.classify_groups(processed)
+    classify_paths = {
+        side: (args.ai / f"{stem}_input.json", args.ai / f"{stem}_decisions.json")
+        for side, stem in ai_stage.CLASSIFY_SIDES
+    }
+
+    for side, (input_path, _) in classify_paths.items():
+        payload = ai_stage.build_classify_input(groups[side], day, side)
+        if not args.dry_run:
+            write_json(input_path, payload)
+        print(f"classify {side}: {payload['item_count']} items -> {input_path.name}",
+              file=sys.stderr)
+
+    if ai_backend != "none":
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {
+                side: pool.submit(
+                    ai_model.generate, ai_backend, input_path, decisions_path,
+                    model=args.ai_model, timeout=args.ai_timeout,
+                    force=force_for(decisions_path), dry_run=args.dry_run,
+                    extra_args=args.ai_extra_args, day=day, verbose=False)
+                for side, (input_path, decisions_path) in classify_paths.items()
+            }
+            report["classify_calls"] = {}
+            for side, future in futures.items():
+                try:
+                    report["classify_calls"][side] = future.result()
+                except Exception as exc:  # noqa: BLE001 - one side must not sink the other
+                    report["classify_calls"][side] = {
+                        "backend": ai_backend,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+
+    categories_payload: dict = {
+        "schema": ai_stage.CATEGORIES_SCHEMA,
+        "day": day,
+        "generated_at": report["generated_at"],
+        "sides": {},
+    }
+    report["classify"] = {}
+    for entry in (e for items in processed.values() for e in items):
+        entry["category"] = None
+
+    anchor = 0
+    for side, (_, decisions_path) in classify_paths.items():
+        items = groups[side]
+        decisions = load_decisions(decisions_path, day)
+        side_report: dict = {
+            "decisions_file": str(decisions_path) if decisions else None,
+            "item_count": len(items),
+            "classified": 0,
+            "categories": 0,
+            "rejected": 0,
+            "problems": [],
+        }
+        categories: list[dict] = []
+        if decisions:
+            accepted, problems = ai_stage.validate_classify_decisions(
+                decisions, side, index_by_id)
+            accepted, shape_problems = ai_stage.finalize_categories(
+                accepted, items, side)
+            problems += shape_problems
+            categories = ai_stage.apply_classify_decisions(
+                accepted, index_by_id, anchor_start=anchor)
+            anchor += len(categories)
+            for category in accepted:
+                for ref in category["item_ids"]:
+                    target = index_by_id.get(ref)
+                    if target is not None:
+                        target["category"] = category["name"]
+            side_report.update({
+                "model": decisions.get("model"),
+                "categories": len(categories),
+                "classified": sum(len(c["refs"]) for c in categories),
+                "rejected": len(problems),
+                "problems": problems,
+            })
+            for problem in problems[:10]:
+                print(f"  ! classify {side}: {problem}", file=sys.stderr)
+
+        categories_payload["sides"][side] = {
+            "nature": side,
+            "item_count": len(items),
+            "classified": side_report["classified"],
+            "categories": categories,
+        }
+        report["classify"][side] = side_report
+        # One line per side, whatever happened. With verbose=False on both
+        # calls, a failed side would otherwise leave nothing but its own
+        # absence — which is exactly what a side with no decisions looks like.
+        error = ((report.get("classify_calls") or {}).get(side) or {}).get("error")
+        if error:
+            print(f"  ! classify {side}: no decisions ({error})", file=sys.stderr)
+        print(f"classify {side}: {side_report['classified']}/{len(items)} categorised "
+              f"into {side_report['categories']} categories, "
+              f"{side_report['rejected']} rejected", file=sys.stderr)
+
     # ---------------- write processed sources ----------------
+    # After 2c/2d, so every item carries the `category` it was filed under.
     written: set[str] = set()
     if not args.dry_run:
         for name in ai_stage.source_order(processed):
@@ -305,6 +419,11 @@ def main() -> int:
                 "items": processed[name],
             })
             written.add(f"{name}.json")
+        # A separate file from digest.json on purpose: a classification that
+        # fails must not cost the briefing, and vice versa.
+        if ai_stage.has_categories(categories_payload):
+            write_json(args.out / "categories.json", categories_payload)
+            written.add("categories.json")
 
     # ---------------- stage 2b input ----------------
     digest_input = ai_stage.build_digest_input(processed, statuses, day)
@@ -326,7 +445,6 @@ def main() -> int:
 
     digest_decisions_path = args.ai / "digest_decisions.json"
     digest_decisions = load_decisions(digest_decisions_path, day)
-    index_by_id, aliases = ai_stage.build_item_index(processed)
     if digest_decisions:
         digest, problems = ai_stage.validate_digest_decisions(digest_decisions, set(index_by_id), aliases)
         panel = ai_stage.apply_digest_decisions(digest, index_by_id)
@@ -339,7 +457,6 @@ def main() -> int:
             "decisions_file": str(digest_decisions_path),
             "model": digest.get("model"),
             "highlights": len(panel["cards"]),
-            "themes": len(panel["themes"]),
             "resolved_aliases": sum(
                 1 for card in panel["cards"] for ref in card["refs"]
                 if ref["id"] in aliases
@@ -347,7 +464,7 @@ def main() -> int:
             "rejected": len(problems),
             "problems": problems,
         }
-        print(f"digest: {len(panel['cards'])} highlights, {len(panel['themes'])} themes, "
+        print(f"digest: {len(panel['cards'])} highlights, "
               f"{len(problems)} rejected", file=sys.stderr)
         for problem in problems[:10]:
             print(f"  ! {problem}", file=sys.stderr)
@@ -375,6 +492,7 @@ def main() -> int:
             "stage2": {
                 "ai_backend": ai_backend,
                 "telegram": {k: v for k, v in report["telegram"].items() if k != "drop_details"},
+                "classify": report["classify"],
                 "digest": report.get("digest"),
             },
         })

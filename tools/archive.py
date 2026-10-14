@@ -129,7 +129,11 @@ def summarise(snapshot: Path) -> dict:
             "items_after": (stage2.get("telegram") or {}).get("items_after"),
         },
         "highlights": len(digest.get("cards") or []),
-        "themes": len(digest.get("themes") or []),
+        # From the stage 2 report in index.json, not from the processed files:
+        # the categories live in processed/categories.json, and index.json is
+        # the one file every snapshot is guaranteed to carry.
+        "categories": sum((side or {}).get("categories") or 0
+                          for side in (stage2.get("classify") or {}).values()),
         "digest_bytes": digest_html.stat().st_size if digest_html.exists() else None,
     }
 

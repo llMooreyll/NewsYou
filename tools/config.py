@@ -27,6 +27,7 @@ diffable snapshot and still valid TOML.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -47,7 +48,11 @@ FEED_REQUIRED = {"id", "url"}
 # Tables keyed by source name. Their keys are open — a config-defined feed adds
 # its own entry — so unknown keys are allowed there; only the value type is
 # checked, using the built-in entries as the sample.
-OPEN_TABLES = {"sources.limits", "sources.labels"}
+#
+# `sources.units` is in this set and is non-empty in defaults(): an empty table
+# has no value to use as the sample, so _validate would type-check nothing at
+# all and a nested table would flatten into keys nothing ever looks up.
+OPEN_TABLES = {"sources.limits", "sources.labels", "sources.units"}
 
 
 class ConfigError(RuntimeError):
@@ -96,8 +101,18 @@ def defaults() -> dict:
         "sources": {
             "order": list(registry.ORDER),
             "enabled": [],                  # empty = every source in order
-            "limits": {name: registry.default_limit(name) for name in registry.ORDER},
+            # Only registered sources have a built-in limit; a [[feeds]] entry
+            # brings its own (`limit = 20`) and is absent here on purpose.
+            "limits": {name: registry.default_limit(name) for name in registry.ORDER
+                       if name in registry.SOURCES},
             "labels": dict(registry.SOURCE_LABELS),
+            # Which sources are discussion and which are long-form. Anything
+            # unlisted is news. Seeded from the registry so the file and the
+            # built-in default cannot drift.
+            "nature": registry.nature_groups(),
+            # "<source>:<unit>" -> nature, for a single Telegram channel or one
+            # linux.do section that disagrees with its source.
+            "units": dict(registry.UNIT_NATURE),
         },
         "feeds": [],                        # generic RSS/Atom, free-form list
         "output": {
@@ -144,6 +159,17 @@ def _toml_str(text: str) -> str:
     return '"' + (text.replace("\\", "\\\\").replace('"', '\\"')
                   .replace("\n", "\\n")) + '"'
 
+_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+def _toml_key(key: str) -> str:
+    """Bare where TOML allows it, quoted otherwise.
+
+    `sources.units` keys are `<source>:<unit>`, and a bare colon is not a legal
+    TOML key: rendering one unquoted would produce a --show-config dump that
+    tomllib refuses to read back.
+    """
+    return key if _BARE_KEY.match(key) else _toml_str(key)
+
 
 def _toml_value(value) -> str:
     if isinstance(value, bool):
@@ -171,7 +197,7 @@ def _render(node: dict, path: str, origins: dict | None) -> list[str]:
         suffix = ""
         if origins is not None:
             suffix = f"  # from {origins.get(dotted, 'default')}"
-        lines.append(f"{key} = {_toml_value(value)}{suffix}")
+        lines.append(f"{_toml_key(key)} = {_toml_value(value)}{suffix}")
     for key, value in tables:
         name = f"{path}.{key}" if path else key
         if isinstance(value, list):
@@ -213,6 +239,12 @@ def _validate(node, schema, where: str = "") -> None:
                           f"got {type(node).__name__}")
     for key, value in node.items():
         dotted = f"{where}.{key}" if where else key
+        if where == "sources.units" and ":" not in str(key):
+            # Catches both a typo and the nested-table form [sources.units.telegram],
+            # which would flatten into keys nothing ever looks up.
+            raise ConfigError(
+                f"{dotted}: a unit key must be '<source>:<unit>', "
+                f"for example telegram:reorx_share")
         if key not in schema:
             if where in OPEN_TABLES:
                 sample = next(iter(schema.values()), None)
@@ -250,6 +282,48 @@ def _validate_feeds(value) -> None:
         if missing:
             raise ConfigError(f"feeds[{index}]: missing {', '.join(sorted(missing))}")
 
+
+def _validate_effective(flat: dict) -> None:
+    """Checks that need the merged configuration rather than the file alone.
+
+    _validate() sees one file and cannot know which source names exist: a
+    `[[feeds]]` id is registered by the collector, not by the schema. So a typo
+    in sources.nature or sources.units has to be caught here, after the merge,
+    or it silently falls back to the source-level default and the entry does
+    nothing at all.
+
+    `flat` maps dotted keys to values, so the checks read the effective value
+    of every key regardless of which layer set it.
+    """
+    from collectors import registry
+
+    known = set(registry.SOURCES)
+    for feed in flat.get("feeds") or []:
+        if isinstance(feed, dict) and feed.get("id"):
+            known.add(str(feed["id"]))
+    channels = {str(c) for c in (flat.get("telegram.channels") or [])}
+    natures = ", ".join(registry.NATURE_VALUES)
+
+    for key, value in flat.items():
+        if key.startswith("sources.nature."):
+            field = key[len("sources.nature."):]
+            if field not in registry.NATURE_VALUES:
+                raise ConfigError(f"{key}: unknown nature {field!r}; known: {natures}")
+            for name in value or []:
+                if name not in known:
+                    raise ConfigError(f"{key}: unknown source {name!r}; "
+                                      f"known: {', '.join(sorted(known))}")
+        elif key.startswith("sources.units."):
+            source, _, unit = key[len("sources.units."):].partition(":")
+            if source not in known:
+                raise ConfigError(f"{key}: unknown source {source!r}; "
+                                  f"known: {', '.join(sorted(known))}")
+            if value not in registry.NATURE_VALUES:
+                raise ConfigError(f"{key}: unknown nature {value!r}; known: {natures}")
+            # A linux.do section name comes from the page and cannot be checked
+            # here; a Telegram channel can, because the list is in the config.
+            if source == "telegram" and unit not in channels:
+                raise ConfigError(f"{key}: {unit!r} is not in telegram.channels")
 
 def _coerce(text: str, like):
     """Turn an env var string into the type the default implies."""
@@ -354,6 +428,12 @@ def load(path: Path | str | None = None, *, cli: dict | None = None,
             raise ConfigError(f"internal: CLI override for unknown key {key!r}")
         values[key] = value
         origins[key] = "cli"
+
+    try:
+        _validate_effective(values)
+    except ConfigError as exc:
+        where = f"{file_path}: " if file_path.exists() else ""
+        raise ConfigError(f"{where}{exc}") from exc
 
     return Config(values, origins, file_path if file_path.exists() else None)
 

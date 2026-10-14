@@ -30,6 +30,8 @@ SOURCE = "telegram"
 
 # The built-in channel list. config.toml `telegram.channels` overrides it; this
 # stays the fallback so the collector works with no configuration at all.
+# The nature of each channel is decided in registry.UNIT_NATURE, not here:
+# this list only says what to fetch.
 DEFAULT_CHANNELS = [
     "MaiTungNews",
     "tnews365",
@@ -38,6 +40,17 @@ DEFAULT_CHANNELS = [
     "GodlyNews1",
     "NewlearnerChannel",
     "DNSPODT",
+    "douView",
+    "Vwyxrd",
+    "CNSmydream",
+    "reorx_share",
+    "notonlyshare",
+    "bigwalnut",
+    "codedump_notes",
+    "hacker_news_zh",
+    "gledos_microblogging",
+    "wxbyg",
+    "zhihu_bazaar",
 ]
 
 DEFAULT_MEDIA_ROOT = base.media_root()

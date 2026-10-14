@@ -42,14 +42,23 @@ class ConfigLoading(unittest.TestCase):
         """The committed config.toml must not drift from the built-in defaults.
 
         It is documented as a no-op, so a difference is a bug in one of them.
+        The comparison is against defaults(), not against a config-less
+        load(): load(path=None) resolves to the shipped file, so the old
+        assertion compared the file with itself and could never fail. It runs
+        both ways — every default must be restated, and the open tables must
+        carry nothing the schema does not know about.
         """
+        schema = config.defaults()
         shipped = config.load(ROOT / "config" / "config.toml")
-        builtin = config.load(path=None)
-        for key, value in builtin._values.items():
-            if key == "feeds":
+        for key, value in config._flatten(schema).items():
+            if key.startswith("feeds"):
                 continue
             self.assertEqual(shipped.get(key), value,
                              f"{key} differs between config.toml and defaults()")
+        for table in ("sources.limits", "sources.labels", "sources.units"):
+            section = table.split(".")[1]
+            self.assertEqual(shipped.get(table), schema["sources"][section],
+                             f"{table} differs between config.toml and defaults()")
 
     def test_unknown_key_is_rejected(self):
         with self.assertRaises(config.ConfigError):

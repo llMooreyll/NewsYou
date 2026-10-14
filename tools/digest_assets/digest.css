@@ -478,16 +478,31 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
 .dg-m .tp-c{color:var(--fg-3)}
 .dg-m a{color:var(--fg-3);transition:color var(--t-fast)}
 .dg-m a:hover{color:var(--accent-2)}
-.dg-th{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1px;background:var(--line);
-  border:1px solid var(--line);margin-top:16px}
-.th{background:var(--bg);padding:18px 20px;transition:background-color var(--t) var(--ease)}
-.th:hover{background:var(--s1)}
-.th-n{font-family:var(--serif);font-size:15.5px;font-weight:700;color:var(--fg)}
-.th-s{margin-top:6px;font-size:13px;line-height:1.7;color:var(--fg-3)}
-.th-r{margin-top:10px;display:flex;flex-wrap:wrap;gap:4px 12px;font-family:var(--mono);font-size:10.5px}
-.th-r a{color:var(--fg-4);transition:color var(--t-fast)}
-.th-r a:hover{color:var(--accent-2)}
 .dg-note{margin-top:28px;font-family:var(--mono);font-size:11px;line-height:1.8;color:var(--fg-4)}
+
+/* ---------- categories: 分类 and 讨论 blocks ---------- */
+.cat-s{margin-top:8px;font-size:13px;line-height:1.7;color:var(--fg-3)}
+.cat-r{margin-top:8px;display:flex;flex-wrap:wrap;gap:4px 12px}
+
+/* ---------- citations: jump to the item inside its own panel ---------- */
+.cite{font-family:var(--mono);font-size:10.5px;color:var(--fg-4);
+  transition:color var(--t-fast)}
+.cite:hover{color:var(--accent-2)}
+/* scrollIntoView uses block:nearest, so the offset comes from scroll-margin:
+   without it a target lands under the sticky header */
+[id^="it-"]{scroll-margin-top:calc(var(--head-h) + 24px)}
+/* The reveal animation restarts when a panel is unhidden, which would leave the
+   jump target transparent while it scrolls. .no-rv alone loses to .panel.on .rv,
+   so the selector has to repeat both classes. */
+.panel.on .rv.no-rv{animation:none}
+.flash{position:relative}
+.flash::after{content:"";position:absolute;inset:0;border-radius:6px;pointer-events:none;
+  box-shadow:inset 0 0 0 2px var(--accent);animation:flash 1.6s var(--ease-out) both}
+@keyframes flash{0%,100%{opacity:0}10%,55%{opacity:1}}
+@media (prefers-reduced-motion:reduce){
+  .flash::after{animation:flash-hold 1.6s step-end both}
+  @keyframes flash-hold{0%{opacity:1}100%{opacity:0}}
+}
 
 /* ======================================================================
    telegram — JS masonry in reading order; CSS columns as no-JS fallback
