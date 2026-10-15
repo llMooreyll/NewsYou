@@ -17,9 +17,9 @@
  * text beside it does not already say.
  *
  * Motion has one job, which is to say where things came from: a panel arrives
- * from the side of the tab you moved toward, rows rise once on a panel's first
- * showing and never again, notes rise beside the paragraph you are reading.
- * Hover feedback is colour only, so nothing under the pointer moves.
+ * from the side of the tab you moved toward, rows rise on every showing of a
+ * panel, notes rise beside the paragraph you are reading. Hover feedback is
+ * colour only, so nothing under the pointer moves.
  */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 
@@ -45,6 +45,13 @@
   /* falls back to sans when no decent CJK serif is installed (see digest.js),
      so Latin serif is never paired with CJK sans */
   --serif:var(--serif-stack);
+  /* Outlined folio figures — the masthead's day and the categories' index —
+     are digits and nothing else, so a Latin face can lead the stack. Times
+     first: its stroke contrast is what makes a 112px outline read as a formal
+     figure. `--serif` used to be what these drew with, and for a digit that
+     resolves past every Latin name in it to Noto Serif CJK SC, whose Latin
+     glyphs are a lower-contrast contemporary serif. */
+  --serif-fig:"Times New Roman","Nimbus Roman","Liberation Serif","Noto Serif",Georgia,serif;
   --mono:"JetBrains Mono","SF Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,
          "Liberation Mono",monospace;
   --maxw:1320px;
@@ -243,9 +250,11 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
 @keyframes inR{from{opacity:0;transform:translateX(12px)}to{opacity:1;transform:none}}
 @keyframes inL{from{opacity:0;transform:translateX(-12px)}to{opacity:1;transform:none}}
 @keyframes inN{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-/* Rows rise once, on a panel's first showing. Coming back to a panel you have
-   already read should not make you watch it assemble again (.seen). */
-.panel.on:not(.seen) .rv{animation:rv .42s var(--ease-out) both;
+/* Rows rise on every showing, not only the first. Hiding the panel is what
+   restarts this: `hidden` is `display:none`, so un-hiding it starts the
+   animation over. Offscreen rows are skipped entirely by content-visibility
+   below, so only the ones on screen actually run. */
+.panel.on .rv{animation:rv .42s var(--ease-out) both;
   animation-delay:calc(min(var(--i,0),12) * 24ms + 70ms)}
 @keyframes rv{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
 
@@ -276,7 +285,7 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
 .mast .ph-sub{margin-top:12px}
 .mast-d{margin-left:auto;display:flex;align-items:flex-end;gap:16px;flex:none}
 /* The day, in outline: the one large object on the page, and it is a fact. */
-.mast-day{font-family:var(--serif);font-size:clamp(68px,8.4vw,112px);line-height:.74;font-weight:700;
+.mast-day{font-family:var(--serif-fig);font-size:clamp(68px,8.4vw,112px);line-height:.74;font-weight:700;
   letter-spacing:-.03em;color:transparent;-webkit-text-stroke:1px var(--fg-3);
   font-variant-numeric:lining-nums}
 .mast-mo{display:flex;flex-direction:column;gap:4px;padding-bottom:1px;
@@ -389,7 +398,7 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
 .br-bar i{position:absolute;inset:0;background:var(--fg-3);transform-origin:left;
   transform:scaleX(var(--w,0))}
 .br.top .br-bar i{background:var(--accent)}
-.panel.on:not(.seen) .br-bar i{animation:bar .8s var(--ease-out) both;animation-delay:calc(min(var(--i,0),12) * 24ms + 140ms)}
+.panel.on .br-bar i{animation:bar .8s var(--ease-out) both;animation-delay:calc(min(var(--i,0),12) * 24ms + 140ms)}
 @keyframes bar{from{transform:scaleX(0)}}
 .br-v{font-family:var(--mono);font-size:12px;color:var(--fg-2);text-align:right;white-space:nowrap}
 .br-v.dim{color:var(--fg-4)}
@@ -507,8 +516,13 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
 /* ======================================================================
    少数派 派早报 feature
    ====================================================================== */
-.feat{max-width:800px}
-.feat-h{padding:26px 0 22px;border-bottom:1px solid var(--line-2)}
+.feat{max-width:800px;--feat-inset:3px}
+/* The header's rule and the stories' rule below it have to start at the same x,
+   so both are inset by the same amount. A border cannot be inset on its own
+   without moving the header's text with it, hence the pseudo-element. */
+.feat-h{position:relative;padding:26px 0 22px}
+.feat-h::after{content:"";position:absolute;left:var(--feat-inset);right:0;bottom:0;height:1px;
+  background:var(--line-2)}
 .kicker{margin-bottom:10px;font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;
   text-transform:uppercase;color:var(--accent)}
 .feat-h h3{font-family:var(--serif);font-size:27px;line-height:1.4;font-weight:700;letter-spacing:.01em;
@@ -516,7 +530,7 @@ main{max-width:var(--maxw);margin:0 auto;padding:0 var(--pad) 120px;min-height:7
 .feat-h h3 a{transition:color var(--t-fast)}
 .feat-h h3 a:hover{color:var(--accent-2)}
 /* the stories of one issue sit one level below it: indented, on a rule */
-.feat-items{margin-left:3px;padding-left:26px;border-left:1px solid var(--line)}
+.feat-items{margin-left:var(--feat-inset);padding-left:26px;border-left:1px solid var(--line)}
 .feat-h .ar-m{margin-top:12px}
 .blk{padding:26px 0;border-bottom:1px solid var(--line);position:relative}
 .blk:last-child{border-bottom:0}
@@ -637,7 +651,7 @@ a.dg-src:hover .nm svg{opacity:1}
 .cat-grid > .cat{margin:0;padding:22px 0 20px;border-top:1px solid var(--line-2)}
 .cat-h{display:flex;align-items:baseline;gap:12px;font-family:var(--serif);font-size:19px;line-height:1.3;
   font-weight:700;letter-spacing:.02em;color:var(--fg)}
-.cat-ix{flex:none;min-width:1.25em;font-family:var(--serif);font-size:30px;line-height:.75;font-weight:700;
+.cat-ix{flex:none;min-width:1.25em;font-family:var(--serif-fig);font-size:30px;line-height:.75;font-weight:700;
   color:transparent;-webkit-text-stroke:1px var(--line-3);font-variant-numeric:lining-nums;
   transition:-webkit-text-stroke-color var(--t) var(--ease)}
 .cat:hover .cat-ix{-webkit-text-stroke-color:var(--accent)}
@@ -694,9 +708,12 @@ html:not(.js) .cat-btn{display:none}
    jump target transparent while it scrolls. .no-rv alone loses to .panel.on .rv,
    so the selector has to repeat both classes. */
 .panel.on .rv.no-rv{animation:none}
-/* a jump lands on a tinted block with a bar in the margin, which then fades */
+/* a jump lands on a tinted block with a bar in the margin, which then fades.
+   The overlay is `inset:0` rather than reaching outside the row: the rows are
+   content-visibility:auto (below), which clips their descendants to their own
+   box, and a bar sitting 10px out in the margin would be clipped away whole. */
 .flash{position:relative}
-.flash::after{content:"";position:absolute;inset:-4px -10px;pointer-events:none;
+.flash::after{content:"";position:absolute;inset:0;pointer-events:none;
   background:var(--accent-dim);border-left:2px solid var(--accent);animation:flash 1.5s var(--ease-out) both}
 @keyframes flash{0%{opacity:0}12%,55%{opacity:1}100%{opacity:0}}
 @media (prefers-reduced-motion:reduce){
@@ -705,12 +722,41 @@ html:not(.js) .cat-btn{display:none}
 }
 
 /* ======================================================================
+   offscreen work
+   ====================================================================== */
+/* Showing a panel lays the whole thing out in one frame, and the heavy ones are
+   two to three thousand nodes of prose. Measured at 4× CPU throttle, the
+   synchronous part of a tab click was 181–395ms of layout for sspai, latepost,
+   geekpark and ruanyifeng, and 696ms for telegram: the click does not paint
+   until the entire panel has been laid out, which is the lag.
+
+   `content-visibility: auto` lets the browser skip everything outside the
+   viewport and lay it out a screenful at a time as you scroll. The same
+   switches drop to 5–43ms, and since the rows are also the ones carrying the
+   reveal animation, the rows off screen do not animate at all.
+
+   `contain-intrinsic-size: auto <n>` hands a skipped element its own last
+   rendered height, so the scrollbar does not jump once a row has been seen;
+   the length is only the first estimate, for rows never rendered yet. */
+.tp,.br,.ar,.blk,.cat,.dg-hl{content-visibility:auto}
+.tp{contain-intrinsic-size:auto 60px}
+.br{contain-intrinsic-size:auto 48px}
+.ar{contain-intrinsic-size:auto 90px}
+.dg-hl{contain-intrinsic-size:auto 160px}
+.blk{contain-intrinsic-size:auto 340px}
+.cat{contain-intrinsic-size:auto 400px}
+
+/* ======================================================================
    telegram — JS masonry in reading order; CSS columns as no-JS fallback
    ====================================================================== */
 .mas{columns:320px;column-gap:14px}
 .mas.js{columns:auto;display:flex;gap:14px;align-items:flex-start}
 .mas-col{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:14px}
 .mas:not(.js) .tg{break-inside:avoid;margin-bottom:14px}
+/* The cards are placed by JS into whichever column is shortest, which needs
+   their real heights, so they only become skippable once that has happened:
+   layoutMasonry adds the class after it has measured. */
+.mas.js.mas-ready .tg{content-visibility:auto;contain-intrinsic-size:auto 340px}
 .tg{
   position:relative;background:var(--s1);border:1px solid var(--line);
   padding:16px 16px 12px;display:flex;flex-direction:column;gap:10px;

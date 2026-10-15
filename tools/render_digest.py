@@ -256,11 +256,6 @@ def _attr(pattern, attrs: str) -> str | None:
     value = match.group(2) if match.group(2) is not None else match.group(3) or ""
     return html.unescape(value).strip()
 
-def _safe_url(url) -> str | None:
-    """A URL that is safe to put in an href, or None."""
-    text = str(url or "").strip()
-    return text if text.startswith(("http://", "https://")) else None
-
 def _safe_href(attrs: str) -> str | None:
     url = _attr(_HREF_RE, attrs)
     return url if url and url.startswith(("http://", "https://")) else None
@@ -831,6 +826,13 @@ def _summary_sources(refs) -> str:
     mark is there; the notes rise into place, one after another, while the
     paragraph is hovered or focused, and stay put on touch screens.
 
+    A note moves the page rather than opening a tab: the item it names is
+    already in this document, one panel away, so the useful action is the jump
+    the citation chips make — `data-jump`, the same handler. The title in
+    `title=` still says which article it was for a reader who only wants to
+    know, and a ref with no item id keeps its name as plain text rather than
+    becoming a link out.
+
     The wrapper is part of the paragraph's own block rather than a floating
     overlay — see the CSS: a tooltip that disappears the moment the pointer
     leaves the text cannot be clicked, which defeats the point of showing it.
@@ -840,18 +842,19 @@ def _summary_sources(refs) -> str:
         name = _ref_name(ref)
         if not name:
             continue
-        # Same guard the other external links use: only http(s) becomes an
-        # href, so a javascript: or data: URL in the data cannot become one.
-        target = _safe_url(ref.get("url"))
+        key = str(ref.get("id") or "")
         title = ref.get("title") or name
-        inner = f'<span class="nm">{esc(name)}{ICON["out"]}</span>'
         k = len(out) + 1
-        if target:
-            out.append(f'<a class="dg-src" style="--k:{k}" href="{esc(target)}" '
-                       f'target="_blank" rel="noopener noreferrer" '
-                       f'title="{esc(title)}">{inner}</a>')
+        # `href` keeps the note usable with no JS; the script intercepts the
+        # click, because boot reads location.hash as a tab key and an item id
+        # in there would send a reload to the wrong place.
+        if key:
+            out.append(f'<a class="dg-src" style="--k:{k}" href="#it-{esc(key)}" '
+                       f'data-jump="{esc(key)}" title="{esc(title)}">'
+                       f'<span class="nm">{esc(name)}{ICON["jump"]}</span></a>')
         else:
-            out.append(f'<span class="dg-src" style="--k:{k}" title="{esc(title)}">{inner}</span>')
+            out.append(f'<span class="dg-src" style="--k:{k}" title="{esc(title)}">'
+                       f'<span class="nm">{esc(name)}</span></span>')
     if not out:
         return ""
     return (f'<aside class="dg-srcs" aria-label="本段来源">'

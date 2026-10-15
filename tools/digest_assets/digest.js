@@ -94,10 +94,8 @@
       t.tabIndex = on ? 0 : -1;
     });
     panel.hidden = false;
-    /* Rows rise only the first time a panel is shown; coming back to one is a
-       return to something already read, so it simply appears. */
-    if (panel.dataset.visited) panel.classList.add('seen');
-    panel.dataset.visited = '1';
+    /* Rows rise on every showing: un-hiding restarts the animation, which is
+       what the reveal is for — arriving somewhere is the moment it marks. */
     panel.classList.add('on', oldIdx < 0 ? 'in-n' : (newIdx > oldIdx ? 'in-r' : 'in-l'));
     current = id;
 
@@ -265,6 +263,10 @@
     if (!force && box.dataset.cols === String(n)) return;
     var cards = $$('.tg', box);
     box.classList.add('js');
+    /* Measuring needs the cards' real heights, and content-visibility hands
+       back the placeholder for anything off screen, so it goes off for the
+       measurement and back on once the placement is settled. */
+    box.classList.remove('mas-ready');
     var cols = [];
     for (var i = 0; i < n; i++) {
       var c = doc.createElement('div');
@@ -273,12 +275,22 @@
     }
     $$('.mas-col', box).forEach(function (c) { c.remove(); });
     cols.forEach(function (c) { box.appendChild(c); });
+    /* Place first, measure after. A card's height depends on the column width,
+       so it has to be measured in a column; but reading offsetHeight inside
+       the placement loop forced a full re-layout per card — measured, 132 of
+       them for the telegram panel, 530ms of the 858ms it took to open. Two
+       passes over the list do the same thing with one layout. */
+    cards.forEach(function (card, i) { cols[i % n].appendChild(card); });
+    var h = cards.map(function (card) {
+      return card.hidden ? 0 : card.offsetHeight + 14;
+    });
     var heights = cols.map(function () { return 0; });
-    cards.forEach(function (card) {
+    cards.forEach(function (card, i) {
       var j = heights.indexOf(Math.min.apply(null, heights));
       cols[j].appendChild(card);
-      if (!card.hidden) heights[j] += card.offsetHeight + 14;
+      heights[j] += h[i];
     });
+    box.classList.add('mas-ready');
     box.dataset.cols = String(n);
   }
 
