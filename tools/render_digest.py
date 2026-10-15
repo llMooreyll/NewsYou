@@ -103,7 +103,14 @@ ICON = {
     "sun": '<svg class="sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"/></svg>',
     "moon": '<svg class="moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M13.5 9.6A5.8 5.8 0 0 1 6.4 2.5a5.8 5.8 0 1 0 7.1 7.1Z"/></svg>',
     "play": '<svg viewBox="0 0 10 10" fill="currentColor"><path d="M2.5 1.5v7l6-3.5z"/></svg>',
+    # A jump within the page, not a link out: it bends down into the document.
+    "jump": '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 1.5v5h6M5.8 4.2 8.1 6.5 5.8 8.8"/></svg>',
+    "down": '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 3.5 5 6.5l3-3"/></svg>',
 }
+
+# Latin small-caps labels set beside the Chinese headings. Decorative, so they
+# are hidden from assistive technology wherever they appear.
+SIDE_EN = {"新闻": "News", "讨论": "Discussion", "汇总": "Summary"}
 
 # Render context: the day being rendered, so "today" is the data's day and not
 # the wall clock when the file is opened.
@@ -485,7 +492,11 @@ def image_tag(path: Path, embed: bool, out_dir: Path) -> str:
 # shared fragments
 # --------------------------------------------------------------------------
 
-def panel_head(title: str, sub: str, status: dict | None, extra_meta: str = "") -> str:
+def panel_head(title: str, sub: str, status: dict | None, extra_meta: str = "",
+               folio: str = "") -> str:
+    """The opener of a source panel: folio, title, one line of context, and the
+    freshness facts on the right. `folio` is the panel's place in the issue
+    ("03 / 11"), set like a page number above the title."""
     meta = [extra_meta] if extra_meta else []
     if status:
         if status.get("absent"):
@@ -497,9 +508,39 @@ def panel_head(title: str, sub: str, status: dict | None, extra_meta: str = "") 
         latest = status.get("latest_published_at")
         if latest:
             meta.append(f'<span><span class="k">最新 </span><span class="v">{esc(fmt_md(latest))} {esc(fmt_time(latest))}</span></span>')
-    return (f'<header class="ph"><div class="ph-t"><h1>{esc(title)}</h1>'
+    return (f'<header class="ph"><div class="ph-t">'
+            + (f'<p class="ph-k" aria-hidden="true">{esc(folio)}</p>' if folio else "")
+            + f'<h1>{esc(title)}</h1>'
             + (f'<p class="ph-sub">{esc(sub)}</p>' if sub else "")
             + f'</div><div class="ph-meta">{"".join(meta)}</div></header>')
+
+
+def digest_masthead(day: str, model: str, total: int, sources: int) -> str:
+    """The front page's nameplate.
+
+    The day is the panel's real subject, so it is set large, in outline, as the
+    one decorative object on the page; everything else stays at text size. The
+    week number and weekday are calendar facts, not an invented issue number.
+    """
+    try:
+        dt = datetime.strptime(str(day)[:10], "%Y-%m-%d")
+    except ValueError:
+        dt = datetime.now(CST)
+    week = dt.isocalendar()[1]
+    month = dt.strftime("%b").upper()
+    facts = [f"{dt.year} 年第 {week} 周", f"周{WEEKDAYS[dt.weekday()]}",
+             f"{total} 条 · {sources} 源"]
+    return (
+        '<header class="ph mast">'
+        '<div class="mast-t">'
+        '<p class="ph-k" aria-hidden="true">The Day in Brief</p>'
+        '<h1>今日汇总</h1>'
+        f'<p class="ph-sub">跨源合并与排序{(" · " + esc(model)) if model else ""}</p>'
+        '</div>'
+        f'<div class="mast-d" aria-label="{esc(fmt_day(day))}">'
+        f'<span class="mast-day" aria-hidden="true">{dt.day:02d}</span>'
+        f'<span class="mast-mo" aria-hidden="true"><b>{month}</b>{"".join(f"<i>{esc(f)}</i>" for f in facts)}</span>'
+        '</div></header>')
 
 
 def scroller(inner: str, cls: str = "", label: str = "") -> str:
@@ -511,33 +552,51 @@ def scroller(inner: str, cls: str = "", label: str = "") -> str:
             "</div>")
 
 
-def _rail_btn(key: str, label: str, count, attr: str, cls: str = "") -> str:
+def _rail_btn(key: str, label: str, count, attr: str, cls: str = "", index: str = "") -> str:
+    """One rail entry: optional folio number, the label, a dotted leader, the count.
+
+    The leader is what lets a long label and a short one still read as rows of
+    one table without a column rule between them.
+    """
     return (f'<button class="rail-a{cls}" type="button" {attr}="{esc(key)}" title="{esc(label)}">'
-            f'<span class="lbl">{esc(label)}</span>'
+            + (f'<span class="ix" aria-hidden="true">{esc(index)}</span>' if index else "")
+            + f'<span class="lbl">{esc(label)}</span>'
+            + '<span class="lead" aria-hidden="true"></span>'
             + (f'<span class="n">{count}</span>' if count is not None else "")
             + "</button>")
+
+
+RAIL_EN = {"spy": "Contents", "filter": "Filter"}
 
 
 def rail(links: list[tuple], mode: str, heading: str) -> str:
     """links: (key, label, count) or (key, label, count, children).
 
-    Children are rendered one level down and indented, so the rail mirrors the
-    page outline (e.g. 派早报 > its news items, next to 近期文章).
+    A table of contents rather than a flat list. Top-level entries are numbered
+    like the sections of an issue; a group's children stay folded until that
+    group is the one being read (the script opens it), so a page with seventeen
+    categories shows three lines at rest instead of twenty.
     """
     attr = "data-target" if mode == "spy" else "data-filter"
+    numbered = mode == "spy"
     out = []
     for i, link in enumerate(links):
         key, label, count = link[:3]
         children = link[3] if len(link) > 3 else []
         cls = " on" if i == 0 else ""
+        index = f"{i + 1:02d}" if numbered else ""
+        head = _rail_btn(key, label, count, attr, cls, index)
         if children:
             subs = "".join(_rail_btn(k, l, c, attr, " sub") for k, l, c in children)
-            out.append(f'<div class="rail-g">{_rail_btn(key, label, count, attr, cls)}'
-                       f'<div class="rail-sub">{subs}</div></div>')
+            opened = " open" if i == 0 else ""
+            out.append(f'<div class="rail-g{opened}">{head}'
+                       f'<div class="rail-sub"><div class="rail-sub-in">{subs}</div></div></div>')
         else:
-            out.append(_rail_btn(key, label, count, attr, cls))
-    inner = f'<nav class="rail-list" aria-label="{esc(heading)}">{"".join(out)}<span class="rail-ink"></span></nav>'
-    return (f'<aside class="rail" data-mode="{mode}"><div class="rail-h">{esc(heading)}</div>'
+            out.append(f'<div class="rail-g">{head}</div>')
+    inner = f'<nav class="rail-list" aria-label="{esc(heading)}">{"".join(out)}</nav>'
+    return (f'<aside class="rail" data-mode="{mode}">'
+            f'<div class="rail-h"><span>{esc(heading)}</span>'
+            f'<span class="en" aria-hidden="true">{RAIL_EN.get(mode, "")}</span></div>'
             f'{scroller(inner)}</aside>')
 
 
@@ -546,9 +605,13 @@ def with_rail(rail_html: str, content: str) -> str:
 
 
 def expander(label: str, count: str, inner: str) -> str:
-    chev = '<svg class="chev" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3.5 2 6.5 5l-3 3"/></svg>'
-    return (f'<div class="exp"><button class="exp-btn" type="button" aria-expanded="false">{chev}'
-            f'{esc(label)}' + (f'<span class="c">{esc(count)}</span>' if count else "") + "</button>"
+    """A full-text toggle set as a quiet line of type, not a bordered button:
+    in a list of fifteen articles, fifteen boxed buttons are the loudest thing
+    on the page."""
+    chev = f'<span class="chev" aria-hidden="true">{ICON["down"]}</span>'
+    return (f'<div class="exp"><button class="exp-btn" type="button" aria-expanded="false">'
+            f'<span class="t">{esc(label)}</span>' + (f'<span class="c">{esc(count)}</span>' if count else "")
+            + f"{chev}</button>"
             f'<div class="exp-body"><div class="exp-inner"><div class="exp-pad">'
             f'<div class="prose">{inner}</div>'
             f'<button class="exp-close" type="button">收起 ↑</button>'
@@ -585,6 +648,11 @@ def _cite(ref: dict) -> str:
     useful action is a jump, not a link out. One chip per item: a source cited
     twice shows twice, which is the point when each chip lands somewhere else.
 
+    Set as the source's name and a bent arrow, small and in the row's own line:
+    the title beside it already says what the item is, so the chip only has to
+    say where it lives. The arrow bends down into the page because the chip
+    stays in this document; the out-arrow is kept for links that leave it.
+
     `href` keeps it usable with no JS; the script intercepts the click, because
     boot reads location.hash as a tab key and an item id in there would send a
     reload to the wrong place.
@@ -594,13 +662,9 @@ def _cite(ref: dict) -> str:
     if not key or not name:
         return ""
     key = str(key)
-    # "去…看原文" rather than the bare source name: the chip is an action, and
-    # a lone "少数派" next to a summary reads like a label, not a link. The
-    # source name is set apart so a long one ("LoopDNS资讯播报") still parses
-    # at a glance, and the arrow marks it as something that leaves this line.
-    label = f'去<span class="src">{esc(name)}</span>看原文{ICON["out"]}'
     return (f'<a class="cite" href="#it-{esc(key)}" data-jump="{esc(key)}" '
-            f'title="{esc(ref.get("title") or name)}">{label}</a>')
+            f'title="在{esc(name)}中查看：{esc(ref.get("title") or name)}">'
+            f'<span class="src">{esc(name)}</span>{ICON["jump"]}</a>')
 
 def _cites(refs) -> str:
     """One chip per distinct item, in the order given."""
@@ -615,29 +679,77 @@ def _cites(refs) -> str:
             out.append(chip)
     return "".join(out)
 
+# A category shows this many headlines; the rest fold under one line. Folding
+# only pays when it hides enough: a category of six shows all six.
+CAT_PREVIEW = 4
+CAT_FOLD_MIN = 3
+
+def _ref_when(ref: dict) -> str:
+    """The time of the item a ref points at, from the source panels' own data.
+
+    Refs carry no timestamp, but the render has every item in hand; looking it
+    up here keeps the stage-2 record unchanged. Today's items show the time,
+    older ones the date — the same rule the article lists use.
+    """
+    entry = (_CTX.get("index") or {}).get(str(ref.get("id") or ""))
+    if not entry:
+        return ""
+    date, tm = stamp(entry)
+    return tm if date == "今天" and tm else date
+
+def _category_row(ref: dict, index: int) -> str:
+    when = _ref_when(ref)
+    return (f'<li class="tp rv" style="--i:{index}">'
+            f'<p class="tp-t">{ext(ref.get("url"), esc(ref.get("title")))}</p>'
+            f'<p class="tp-m">{_cite(ref)}'
+            + (f'<time>{esc(when)}</time>' if when else "")
+            + "</p></li>")
+
 def _category_sections(categories: list[dict]) -> str:
-    """One section per category: a heading, its summary line, then its items.
+    """One block per category: a numbered head, its one-line summary, the first
+    few headlines, and the rest folded under a single line.
+
+    A day classifies into well over a hundred items, and printing all of them
+    on the front page turned it into an index. The fold keeps every item one
+    click away while the page itself reads as an overview.
 
     These rows carry no `it-` anchor of their own. Those ids belong to the
     source panels, and an id may appear only once in a document — the chip here
     is what points at the item, not the row it sits in.
     """
     out = []
-    for category in categories or []:
+    for number, category in enumerate(categories or [], 1):
         refs = category.get("refs") or []
-        rows = "".join(
-            f'<li class="tp rv" style="--i:{i}">'
-            f'<h3 class="tp-t">{ext(ref.get("url"), esc(ref.get("title")))}</h3>'
-            f'<div class="cat-r">{_cite(ref)}</div></li>'
-            for i, ref in enumerate(refs, 1))
+        shown = refs if len(refs) - CAT_PREVIEW < CAT_FOLD_MIN else refs[:CAT_PREVIEW]
+        rest = refs[len(shown):]
+        rows = "".join(_category_row(ref, i) for i, ref in enumerate(shown, 1))
+        fold = ""
+        if rest:
+            more = "".join(_category_row(ref, i) for i, ref in enumerate(rest, len(shown) + 1))
+            fold = (f'<div class="cat-more">'
+                    f'<div class="cat-rest"><div class="cat-rest-in">'
+                    f'<ol class="topics cat-list">{more}</ol></div></div>'
+                    f'<button class="cat-btn" type="button" aria-expanded="false">'
+                    f'<span class="o">其余 <b>{len(rest)}</b> 条</span>'
+                    f'<span class="c">收起</span>{ICON["down"]}</button></div>')
         out.append(
-            f'<section class="sec" id="{esc(category.get("anchor"))}">'
-            f'<h2 class="sec-h">{esc(category.get("name"))}'
-            f'<span class="n">{len(refs)}</span></h2>'
+            f'<section class="sec cat" id="{esc(category.get("anchor"))}">'
+            f'<h3 class="cat-h"><span class="cat-ix" aria-hidden="true">{number:02d}</span>'
+            f'<span class="cat-n">{esc(category.get("name"))}</span>'
+            f'<span class="n">{len(refs)}</span></h3>'
             + (f'<p class="cat-s">{esc(category.get("summary"))}</p>'
                if category.get("summary") else "")
-            + f'<ol class="topics">{rows}</ol></section>')
+            + f'<ol class="topics cat-list">{rows}</ol>{fold}</section>')
     return "".join(out)
+
+def _side_head(heading: str, count: str = "", aside: str = "") -> str:
+    """A section opener: the Chinese name large, its Latin name in small caps."""
+    en = SIDE_EN.get(heading, "")
+    return (f'<h2 class="sec-h side-h"><span class="zh">{esc(heading)}</span>'
+            + (f'<span class="en" aria-hidden="true">{esc(en)}</span>' if en else "")
+            + (f'<span class="n">{count}</span>' if count else "")
+            + (f'<span class="aside">{aside}</span>' if aside else "")
+            + "</h2>")
 
 def _side_section(anchor: str, heading: str, side: dict) -> str:
     """The 分类 or 讨论 block: one heading, then one section per category.
@@ -651,14 +763,13 @@ def _side_section(anchor: str, heading: str, side: dict) -> str:
         return ""
     total = (side or {}).get("item_count") or 0
     classified = (side or {}).get("classified") or 0
-    aside = f'<span class="aside">已归类 {classified}/{total}</span>' if total else ""
-    return (f'<section class="sec" id="{esc(anchor)}">'
-            f'<h2 class="sec-h">{esc(heading)}'
-            f'<span class="n">{len(categories)}</span>{aside}</h2>'
-            + _category_sections(categories) + "</section>")
+    aside = f"已归类 {classified}/{total}" if total else ""
+    return (f'<section class="sec side" id="{esc(anchor)}">'
+            + _side_head(heading, f"{len(categories)} 类", aside)
+            + f'<div class="cat-grid">{_category_sections(categories)}</div></section>')
 
 def _keyword_cloud(keywords: list[dict]) -> str:
-    """Keywords as plain labels whose size follows the model's own weight.
+    """Keywords as an index line whose type size follows the model's weight.
 
     The weight is the model's judgement of how much each word matters to the
     day, so it drives the type size directly: `--w` is 0–100 and the stylesheet
@@ -668,7 +779,10 @@ def _keyword_cloud(keywords: list[dict]) -> str:
     cells = "".join(
         f'<span style="--w:{int(word.get("weight") or 0)}">{esc(word.get("text"))}</span>'
         for word in keywords or [] if word.get("text"))
-    return f'<div class="dg-kw">{cells}</div>' if cells else ""
+    if not cells:
+        return ""
+    return ('<div class="dg-kw"><p class="dg-kw-h" aria-hidden="true">关键词<span>Index</span></p>'
+            f'<p class="dg-kw-l">{cells}</p></div>')
 
 def _mark_keywords(text: str, words) -> str:
     """Wrap the first occurrence of each keyword inside its own paragraph.
@@ -708,12 +822,14 @@ def _mark_keywords(text: str, words) -> str:
     return "".join(out)
 
 def _summary_sources(refs) -> str:
-    """The source labels drawn beside one paragraph.
+    """The sources of one paragraph, set as marginal notes beside it.
 
-    A source name plus the out-arrow, and nothing else: the paragraph already
-    says what happened, so the link only has to say where to check it. The title
-    is carried in `title=` and revealed on hover, which keeps the resting state
-    to a couple of short labels instead of four article headlines.
+    Each note is the source's name; the article's title rides in `title=`.
+    The paragraph already says what happened, so the note only has to say
+    where to check it, and three short names fit the margin of a three-line
+    paragraph without stretching it. At rest only the margin's small "来源 3"
+    mark is there; the notes rise into place, one after another, while the
+    paragraph is hovered or focused, and stay put on touch screens.
 
     The wrapper is part of the paragraph's own block rather than a floating
     overlay — see the CSS: a tooltip that disappears the moment the pointer
@@ -728,31 +844,39 @@ def _summary_sources(refs) -> str:
         # href, so a javascript: or data: URL in the data cannot become one.
         target = _safe_url(ref.get("url"))
         title = ref.get("title") or name
+        inner = f'<span class="nm">{esc(name)}{ICON["out"]}</span>'
+        k = len(out) + 1
         if target:
-            out.append(f'<a class="dg-src" href="{esc(target)}" '
+            out.append(f'<a class="dg-src" style="--k:{k}" href="{esc(target)}" '
                        f'target="_blank" rel="noopener noreferrer" '
-                       f'title="{esc(title)}">{esc(name)}{ICON["out"]}</a>')
+                       f'title="{esc(title)}">{inner}</a>')
         else:
-            out.append(f'<span class="dg-src" title="{esc(title)}">'
-                       f'{esc(name)}{ICON["out"]}</span>')
-    return f'<span class="dg-srcs">{"".join(out)}</span>' if out else ""
+            out.append(f'<span class="dg-src" style="--k:{k}" title="{esc(title)}">{inner}</span>')
+    if not out:
+        return ""
+    return (f'<aside class="dg-srcs" aria-label="本段来源">'
+            f'<span class="dg-srcs-h" aria-hidden="true">来源<b>{len(out)}</b></span>'
+            f'<span class="dg-srcs-l">{"".join(out)}</span></aside>')
 
 
 def _summary_block(summary: list[dict]) -> str:
     """The day's summary: one paragraph per topic, keywords marked in place.
 
-    Each paragraph is its own block holding both the prose and the sources it
-    was written from. Keeping them in one element is what makes the labels
-    reachable: moving the pointer from the text onto a label never leaves the
-    block, so nothing vanishes under the cursor.
+    Each paragraph is its own block holding a folio number, the prose and the
+    sources it was written from. Keeping them in one element is what makes the
+    notes reachable: moving the pointer from the text onto a note never leaves
+    the block, so nothing vanishes under the cursor. The first paragraph is the
+    lede and is set larger.
     """
     paragraphs = []
     for index, para in enumerate(summary or [], 1):
         text = (para.get("text") or "").strip()
         if not text:
             continue
+        lede = " lede" if not paragraphs else ""
         paragraphs.append(
-            f'<div class="dg-hl rv" style="--i:{index}">'
+            f'<div class="dg-hl rv{lede}" style="--i:{index}">'
+            f'<span class="dg-ix" aria-hidden="true">{len(paragraphs) + 1:02d}</span>'
             f'<p class="dg-p">{_mark_keywords(text, para.get("keywords"))}</p>'
             f'{_summary_sources(para.get("refs"))}</div>')
     return f'<div class="dg-sum">{"".join(paragraphs)}</div>' if paragraphs else ""
@@ -780,9 +904,10 @@ def render_digest_panel(digest: dict | None, categories: dict | None = None) -> 
 
     secs: list[str] = []
     if summary or keywords:
-        secs.append(f'<section class="sec" id="dg-summary">'
-                    f'<h2 class="sec-h">汇总</h2>'
-                    f'{_summary_block(summary)}{_keyword_cloud(keywords)}</section>')
+        paras = sum(1 for p in summary if (p.get("text") or "").strip())
+        secs.append(f'<section class="sec side dg-s" id="dg-summary">'
+                    + _side_head("汇总", f"{paras} 段" if paras else "")
+                    + f'{_summary_block(summary)}{_keyword_cloud(keywords)}</section>')
 
     for anchor, heading, side in (("dg-cats", "新闻", news), ("dg-disc", "讨论", discussion)):
         block = _side_section(anchor, heading, side)
@@ -791,15 +916,15 @@ def render_digest_panel(digest: dict | None, categories: dict | None = None) -> 
 
     notes = []
     if digest.get("stats_note"):
-        notes.append(esc(digest["stats_note"]))
+        notes.append(f'<span>{esc(digest["stats_note"])}</span>')
     if digest.get("model"):
-        notes.append("AI · " + esc(digest["model"]))
+        notes.append(f'<span>AI · {esc(digest["model"])}</span>')
     if notes:
-        secs.append(f'<p class="dg-note">{"<br>".join(notes)}</p>')
+        secs.append(f'<p class="dg-note">{"".join(notes)}</p>')
 
     links: list[tuple] = []
     if summary or keywords:
-        links.append(("dg-summary", "汇总", len(keywords) or None))
+        links.append(("dg-summary", "汇总", None))
     if news_cats:
         links.append(("dg-cats", "新闻", news.get("classified"),
                       [(c.get("anchor"), c.get("name"), len(c.get("refs") or []))
@@ -1281,7 +1406,10 @@ def render_sspai_panel(items: list[dict], status: dict | None = None) -> str:
             first = group[0]["extra"]
             rich = _use_rich(group[0])
             date, tm = stamp(group[0])
-            head = (f'<header class="feat-h rv"><h3>'
+            head = (f'<header class="feat-h rv">'
+                    f'<p class="kicker" aria-hidden="true">Morning Brief'
+                    + (f' · {esc(str(first.get("issue_date"))[:10])}' if first.get("issue_date") else "")
+                    + '</p><h3>'
                     f'{ext(first.get("issue_url"), esc(first.get("issue_title")))}</h3>'
                     f'<div class="ar-m"><span>{esc(date)} {esc(tm)}</span>'
                     + (f'<span>{esc(group[0]["author"])}</span>' if group[0].get("author") else "")
@@ -1392,6 +1520,7 @@ r.dataset.theme=t;if(f==="0")r.classList.add("no-cjk-serif")})(document);
 </header>
 <main>__PANELS__</main>
 <footer class="ft">
+  <span class="ft-mark" aria-hidden="true">Daily Brief</span>
   <span>本地生成 <code>__GENERATED__</code></span>
   <span>每条保留原始链接与时间戳；「AI 合并」条目可对照原始消息</span>
 </footer>
@@ -1459,9 +1588,16 @@ def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: b
                 if n in sources and sources[n].get("day")), "") or \
         datetime.now(CST).date().isoformat()
     _CTX["day"] = str(day)[:10]
+    # Every item by the id a citation names, so the digest panel can show when
+    # a cited item was published without stage 2 having to carry it.
+    _CTX["index"] = {
+        str(entry.get("id") or ai_stage.item_id(entry)): entry
+        for name in names if name in sources
+        for entry in sources[name].get("items") or []}
     total = sum(len(sources[n].get("items") or []) for n in names if n in sources)
     updated = sum(1 for n in names if n in sources
                   and (sources[n].get("status") or {}).get("updated_today"))
+    folio_total = len(names)
 
     tabs, panels = [], []
 
@@ -1478,15 +1614,16 @@ def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: b
             or ai_stage.has_categories(categories):
         model = (digest or {}).get("model") or ""
         add("digest", "今日汇总", _digest_count(digest, categories), True,
-            panel_head("今日汇总", "跨源合并与排序" + (f" · {model}" if model else ""), None)
+            digest_masthead(day, model, total, len(names))
             + render_digest_panel(digest, categories))
 
-    for name in names:
+    for number, name in enumerate(names, 1):
+        folio = f"{number:02d} / {folio_total:02d}"
         if name in absent and name not in sources:
             info = absent[name]
             add(name, info.get("label") or name, 0, False,
                 panel_head(PANEL_TITLE.get(name, info.get("label") or name),
-                           "本次未采集", {"absent": True}) + absent_panel(info),
+                           "本次未采集", {"absent": True}, folio=folio) + absent_panel(info),
                 broken=True)
             continue
         payload = sources[name]
@@ -1522,7 +1659,7 @@ def render(sources: dict[str, dict], digest: dict | None, output: Path, embed: b
             body = render_article_panel(items)
 
         add(name, label, len(items), bool(status.get("updated_today")),
-            panel_head(PANEL_TITLE.get(name, label), sub, status, extra_meta)
+            panel_head(PANEL_TITLE.get(name, label), sub, status, extra_meta, folio=folio)
             + (body if items else '<p class="empty">今日无数据</p>'))
 
     tab_html = scroller("".join(tabs) + '<span class="tab-ink" aria-hidden="true"></span>', "tabs", "信源")
