@@ -94,6 +94,8 @@
       t.tabIndex = on ? 0 : -1;
     });
     panel.hidden = false;
+    /* Rows rise on every showing: un-hiding restarts the animation, which is
+       what the reveal is for — arriving somewhere is the moment it marks. */
     panel.classList.add('on', oldIdx < 0 ? 'in-n' : (newIdx > oldIdx ? 'in-r' : 'in-l'));
     current = id;
 
@@ -106,11 +108,6 @@
 
     layoutMasonry(panel);
     $$('.scroller', panel).forEach(syncScroller);
-    /* rails measured while hidden have no geometry; place their ink now */
-    $$('.rail', panel).forEach(function (r) {
-      var on = $('.rail-a.on', r) || $('.rail-a', r);
-      if (on) setRail(r, on, true);
-    });
     spy();
   }
 
@@ -129,34 +126,32 @@
 
   /* ------------------------------------------------------------------
    * side rails: scroll-spy (sections) or filter (telegram channels)
+   *
+   * Each entry carries its own marker (CSS), so there is no shared ink to
+   * measure and move. In a contents rail the group being read is unfolded and
+   * every other group folds, which keeps a page of seventeen categories down
+   * to the handful of lines that matter where you are.
    * ------------------------------------------------------------------ */
-  function railInk(rail, link, instant) {
-    var bar = rail.querySelector('.rail-ink');
-    if (!bar || !link) return;
-    var horizontal = win.matchMedia('(max-width: 900px)').matches;
-    if (instant) bar.style.transition = 'none';
-    if (horizontal) {
-      bar.style.height = '';
-      bar.style.width = link.offsetWidth - 24 + 'px';
-      bar.style.transform = 'translateX(' + (link.offsetLeft + 12) + 'px)';
-    } else {
-      bar.style.width = '';
-      bar.style.height = link.offsetHeight + 'px';
-      bar.style.transform = 'translateY(' + link.offsetTop + 'px)';
-    }
-    if (instant) { void bar.offsetWidth; bar.style.transition = ''; }
-  }
-  function setRail(rail, link, instant) {
+  function setRail(rail, link) {
     $$('.rail-a', rail).forEach(function (a) { a.classList.toggle('on', a === link); a.classList.remove('in'); });
-    /* a sub-item lights up its parent; on mobile subs are hidden, so the
-       parent also carries the ink */
     var group = link.closest('.rail-g');
     var parent = group && group.querySelector(':scope > .rail-a');
+    /* a sub-item lights up its parent; on mobile the subs are hidden, so the
+       parent is what shows where you are */
     if (parent && parent !== link) parent.classList.add('in');
+    if (rail.dataset.mode === 'spy') {
+      $$('.rail-g', rail).forEach(function (g) { g.classList.toggle('open', g === group); });
+    }
     var target = link.offsetParent === null && parent ? parent : link;
-    railInk(rail, target, instant);
     var track = rail.querySelector('.scroller-track');
     if (track && track.scrollWidth > track.clientWidth) revealIn(track, target);
+    /* a tall rail scrolls on its own; keep the active entry inside it without
+       touching the page's scroll (scrollIntoView would move both) */
+    if (rail.scrollHeight > rail.clientHeight + 2) {
+      var rr = rail.getBoundingClientRect(), tr = target.getBoundingClientRect();
+      if (tr.top < rr.top + 40) rail.scrollTop -= rr.top + 40 - tr.top;
+      else if (tr.bottom > rr.bottom - 40) rail.scrollTop += tr.bottom - rr.bottom + 40;
+    }
   }
 
   var spyLock = 0;
@@ -167,10 +162,16 @@
     if (!rail) return;
     var links = $$('.rail-a', rail);
     var line = headH() + (win.matchMedia('(max-width: 900px)').matches ? 90 : 48);
-    var active = links[0];
+    var active = links[0], activeTop = null;
     links.forEach(function (a) {
       var sec = doc.getElementById(a.dataset.target);
-      if (sec && sec.getBoundingClientRect().top - line <= 0) active = a;
+      if (!sec) return;
+      var top = sec.getBoundingClientRect().top;
+      if (top - line > 0) return;
+      /* sections side by side in a grid pass the line together; the first of
+         the row stands for it, which is where a reader's eye starts */
+      if (activeTop !== null && Math.abs(top - activeTop) < 4) return;
+      active = a; activeTop = top;
     });
     if (win.innerHeight + win.scrollY >= doc.body.scrollHeight - 4) active = links[links.length - 1];
     if (!active.classList.contains('on')) setRail(rail, active);
@@ -262,6 +263,10 @@
     if (!force && box.dataset.cols === String(n)) return;
     var cards = $$('.tg', box);
     box.classList.add('js');
+    /* Measuring needs the cards' real heights, and content-visibility hands
+       back the placeholder for anything off screen, so it goes off for the
+       measurement and back on once the placement is settled. */
+    box.classList.remove('mas-ready');
     var cols = [];
     for (var i = 0; i < n; i++) {
       var c = doc.createElement('div');
@@ -270,12 +275,22 @@
     }
     $$('.mas-col', box).forEach(function (c) { c.remove(); });
     cols.forEach(function (c) { box.appendChild(c); });
+    /* Place first, measure after. A card's height depends on the column width,
+       so it has to be measured in a column; but reading offsetHeight inside
+       the placement loop forced a full re-layout per card — measured, 132 of
+       them for the telegram panel, 530ms of the 858ms it took to open. Two
+       passes over the list do the same thing with one layout. */
+    cards.forEach(function (card, i) { cols[i % n].appendChild(card); });
+    var h = cards.map(function (card) {
+      return card.hidden ? 0 : card.offsetHeight + 14;
+    });
     var heights = cols.map(function () { return 0; });
-    cards.forEach(function (card) {
+    cards.forEach(function (card, i) {
       var j = heights.indexOf(Math.min.apply(null, heights));
       cols[j].appendChild(card);
-      if (!card.hidden) heights[j] += card.offsetHeight + 14;
+      heights[j] += h[i];
     });
+    box.classList.add('mas-ready');
     box.dataset.cols = String(n);
   }
 
@@ -295,6 +310,25 @@
     wrap.classList.toggle('open', !closing);
     var head = wrap.querySelector(':scope > .exp-btn');
     if (head) head.setAttribute('aria-expanded', closing ? 'false' : 'true');
+  });
+
+  /* ------------------------------------------------------------------
+   * category fold on the front page: the first few headlines show, the
+   * rest unfold in place. Folding back from far down the list returns the
+   * reader to the category's head instead of leaving them in the next one.
+   * ------------------------------------------------------------------ */
+  doc.addEventListener('click', function (e) {
+    var btn = e.target.closest('.cat-btn');
+    if (!btn) return;
+    var wrap = btn.closest('.cat-more');
+    var opening = !wrap.classList.contains('open');
+    if (!opening) {
+      var head = wrap.closest('.cat') || wrap;
+      var top = head.getBoundingClientRect().top - headH() - 12;
+      if (top < 0) win.scrollBy({ top: top, behavior: reduce ? 'auto' : 'smooth' });
+    }
+    wrap.classList.toggle('open', opening);
+    btn.setAttribute('aria-expanded', opening ? 'true' : 'false');
   });
 
   /* ------------------------------------------------------------------
@@ -499,10 +533,7 @@
       headH(); syncAllScrollers();
       moveInk(tabs.find(function (t) { return t.dataset.tab === current; }), true);
       var p = current && panelOf(current);
-      if (p) {
-        layoutMasonry(p);
-        $$('.rail', p).forEach(function (r) { var on = $('.rail-a.on', r); if (on) railInk(r, on, true); });
-      }
+      if (p) layoutMasonry(p);
     }, 120);
   });
 
@@ -524,7 +555,7 @@
   if (deepEl) jumpTo(deepId, true, true);
   $$('.rail').forEach(function (r) {
     var on = $('.rail-a.on', r) || $('.rail-a', r);
-    if (on) setRail(r, on, true);
+    if (on) setRail(r, on);
   });
   /* fonts and images can shift widths after first paint */
   win.addEventListener('load', function () {
