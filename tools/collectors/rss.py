@@ -24,7 +24,7 @@ def collect(limit: int = 20, fulltext=base.FULLTEXT_DEFAULT, engine: str = "lega
             *, url: str | None = None, name: str | None = None,
             source: str | None = None, kind: str = "article",
             date_source: str = "rss",
-            workers: int = base.DEFAULT_WORKERS, start=None, **_):
+            workers: int = base.DEFAULT_WORKERS, start=base.WINDOW_UNSET, **_):
     """Fetch one configured feed and normalise it into items."""
     if not url:
         raise ValueError("rss source needs a 'url'")

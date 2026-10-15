@@ -44,7 +44,7 @@ def _list(pages: int = 1, per_page: int = 20) -> list[dict]:
     return out
 
 def collect(limit: int = 15, fulltext=base.FULLTEXT_DEFAULT, engine: str = "legacy",
-            start=None, **_):
+            start=base.WINDOW_UNSET, **_):
     rows = _list(pages=max(1, (limit // 20) + 1), per_page=20)
     now = base.datetime.now(base.CST)
     items: list[dict] = []
