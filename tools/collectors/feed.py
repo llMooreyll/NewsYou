@@ -36,7 +36,7 @@ def feed_items(feed_url: str, source: str, source_name: str, *, engine: str,
             break
     return items
 
-def fetch_bodies(items: list[dict], *, engine: str, fulltext, today=None,
+def fetch_bodies(items: list[dict], *, engine: str, fulltext, start=None,
                  legacy_marker: str | None = None, sleep: float = 0.4,
                  include_images: bool = False,
                  workers: int = base.DEFAULT_WORKERS) -> None:
@@ -47,7 +47,7 @@ def fetch_bodies(items: list[dict], *, engine: str, fulltext, today=None,
     source is not hammered any harder than it was when this was serial — the
     pause is now overlapped with other fetches instead of adding up.
     """
-    targets = list(base.fulltext_targets(items, fulltext, today))
+    targets = list(base.fulltext_targets(items, fulltext, start))
 
     def body_for(entry: dict) -> dict | None:
         try:

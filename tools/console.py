@@ -335,15 +335,69 @@ def capture():
     the screen drifts a row. Swapping the stream for a buffer keeps the live
     region intact and lets the caller decide where the messages belong.
 
-    The reporter is unaffected: it captured its own stream when it was built.
+    The buffer is per thread, not per process: sources are fetched concurrently
+    now, and a single shared swap would have one source capturing another's
+    output. The reporter is unaffected either way — it captured its own stream
+    when it was built.
     """
     buffer = io.StringIO()
-    original = sys.stderr
-    sys.stderr = buffer
+    _stderr_router().push(buffer)
     try:
         yield buffer
     finally:
-        sys.stderr = original
+        _stderr_router().pop()
+
+
+class _StderrRouter:
+    """A stand-in for sys.stderr that redirects per thread.
+
+    Installed once, in place of the real stream, so that `print(..., file=sys.stderr)`
+    inside a worker thread goes to that thread's buffer while the reporter keeps
+    writing to the terminal. The alternative — swapping the global for the
+    duration of a fetch — works only while one source is in flight.
+    """
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self._local = threading.local()
+
+    def push(self, stream) -> None:
+        self._local.stream = stream
+
+    def pop(self) -> None:
+        self._local.stream = None
+
+    def _target(self):
+        return getattr(self._local, "stream", None) or self._real
+
+    def write(self, text: str):
+        return self._target().write(text)
+
+    def writelines(self, lines):
+        return self._target().writelines(lines)
+
+    def flush(self):
+        return self._target().flush()
+
+    def isatty(self) -> bool:
+        return bool(getattr(self._real, "isatty", lambda: False)())
+
+    def fileno(self):
+        return self._real.fileno()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+_router: _StderrRouter | None = None
+
+
+def _stderr_router() -> _StderrRouter:
+    global _router
+    if _router is None:
+        _router = _StderrRouter(sys.stderr)
+        sys.stderr = _router
+    return _router
 
 
 def captured_lines(buffer) -> list[str]:

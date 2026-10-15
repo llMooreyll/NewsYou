@@ -52,7 +52,8 @@ FEED_REQUIRED = {"id", "url"}
 # `sources.units` is in this set and is non-empty in defaults(): an empty table
 # has no value to use as the sample, so _validate would type-check nothing at
 # all and a nested table would flatten into keys nothing ever looks up.
-OPEN_TABLES = {"sources.limits", "sources.labels", "sources.units"}
+OPEN_TABLES = {"sources.limits", "sources.labels", "sources.units",
+               "sources.day_start_hour"}
 
 
 class ConfigError(RuntimeError):
@@ -133,6 +134,17 @@ def defaults() -> dict:
             # "<source>:<unit>" -> nature, for a single Telegram channel or one
             # linux.do section that disagrees with its source.
             "units": dict(registry.UNIT_NATURE),
+            # What counts as "today" for a source, as the hour its day begins in
+            # Asia/Shanghai. A source absent here starts at midnight, which is
+            # what most of them want. linux.do is the reason this exists: it
+            # publishes its 晚报 as one batch at 22:00, so the previous evening's
+            # edition is the one that belongs to today, and judging it against
+            # midnight would drop the whole source from a daily summary.
+            "day_start_hour": dict(registry.DAY_START_HOUR),
+            # Hours subtracted from a source's start hour. linux.do is listed at
+            # 21 and actually publishes at 22:00, and this is why: an edition
+            # that slips half an hour late must not fall out of its own day.
+            "day_start_grace_hours": 1,
         },
         "feeds": [],                        # generic RSS/Atom, free-form list
         "output": {
@@ -333,6 +345,13 @@ def _validate_effective(flat: dict) -> None:
                 if name not in known:
                     raise ConfigError(f"{key}: unknown source {name!r}; "
                                       f"known: {', '.join(sorted(known))}")
+        elif key.startswith("sources.day_start_hour."):
+            source = key[len("sources.day_start_hour."):]
+            if source not in known:
+                raise ConfigError(f"{key}: unknown source {source!r}; "
+                                  f"known: {', '.join(sorted(known))}")
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 23:
+                raise ConfigError(f"{key}: expected an hour 0-23, got {value!r}")
         elif key.startswith("sources.units."):
             source, _, unit = key[len("sources.units."):].partition(":")
             if source not in known:

@@ -63,7 +63,7 @@ CLASSIFY_SIDES = (("news", "classify"), ("discussion", "classify_forum"))
 
 # Shape rules for one side's categories. The model names them freely, so these
 # are what keep a day's page readable when the model returns forty buckets.
-CATEGORY_LIMIT = 12          # named categories per side; the fallback is extra
+CATEGORY_LIMIT = 8           # named categories per side; the fallback is extra
 CATEGORY_MIN_ITEMS = 2       # a smaller category folds into the fallback
 CATEGORY_FALLBACK = "其他"
 CATEGORY_NAME_LIMIT = 40
@@ -78,6 +78,7 @@ DIGEST_ITEM_SUMMARY_LIMIT = 1600
 DIGEST_SUMMARY_LIMIT = 900          # across all paragraphs
 DIGEST_PARAGRAPH_LIMIT = 6
 DIGEST_PARAGRAPH_KEYWORDS = 5       # per paragraph
+DIGEST_PARAGRAPH_SOURCES = 4        # source links drawn beside one paragraph
 KEYWORD_LIMIT = 20
 KEYWORD_TEXT_LIMIT = 24
 
@@ -251,15 +252,31 @@ def build_telegram_input(items: list[dict], day: str) -> dict:
 # --------------------------------------------------------------------------
 
 def build_digest_input(results: dict[str, list[dict]], statuses: dict[str, dict], day: str) -> dict:
+    """Stage 2b's input: the day, as every source saw it.
+
+    The window is the point of this function, and it is the same window the
+    classification uses — one definition of "today", applied to both. A source
+    can carry a backlog: Solidot publishes several stories a day, so a 20-item
+    fetch reaches back through the week, and a weekly column or a five-day-old
+    派评 is in the fetch without being anything that happened today. Every item
+    has to be inside its own source's window, which is not the same date for
+    every source: linux.do's day starts the previous evening, so its 晚报
+    counts as today.
+
+    What differs from the classification is only which natures are wanted. The
+    summary sees the whole day — short messages and long reads alike — while
+    the categories take the short ones alone, because a long read is not a
+    category, it is its own panel.
+    """
     sources: dict[str, dict] = {}
     total = 0
     for name in source_order(results):
-        items = results[name]
         status = statuses.get(name) or {}
+        items = [e for e in results[name] if _in_window(e)]
         payload = [slim_item(e) for e in items]
         total += len(payload)
         sources[name] = {
-            "source_name": source_label(name, items),
+            "source_name": source_label(name, results[name]),
             "updated_today": status.get("updated_today"),
             "staleness_days": status.get("staleness_days"),
             "latest_published_at": status.get("latest_published_at"),
@@ -295,20 +312,40 @@ def build_digest_input(results: dict[str, list[dict]], statuses: dict[str, dict]
 # --------------------------------------------------------------------------
 
 def classify_groups(results: dict[str, list[dict]]) -> dict[str, list[dict]]:
-    """Split the items by nature, in panel order.
+    """Split the short items by nature, in panel order.
 
-    `longform` is deliberately not a group: those sources are irregularly
-    updated long reads, so they keep their own panel and get no category. An
-    item with no stamped nature counts as news — which is also what a data set
-    collected before the field existed looks like.
+    Two things are deliberately absent. `longform` is not a group: those sources
+    are irregularly updated long reads, so they keep their own panel and get no
+    category. And an item outside its source's current window is left out too —
+    a category is a reading of the day, so a week-old entry from a source that
+    happens to carry a backlog does not belong in one.
+
+    An item with no stamped nature counts as news — which is also what a data
+    set collected before the field existed looks like.
     """
     groups: dict[str, list[dict]] = {side: [] for side, _ in CLASSIFY_SIDES}
     for name in source_order(results):
         for entry in results[name]:
             nature = entry.get("nature") or "news"
-            if nature in groups:
-                groups[nature].append(entry)
+            if nature not in groups:
+                continue
+            # `is_today` is stamped per source at collection time, against that
+            # source's own day window. A data set from before the field existed
+            # has no stamp at all, and is kept rather than silently emptied.
+            if entry.get("is_today") is False:
+                continue
+            groups[nature].append(entry)
     return groups
+
+def _in_window(entry: dict) -> bool:
+    """Whether an item falls inside its source's current day.
+
+    An unstamped item is kept: the stamp is written at collection time, so its
+    absence means older data rather than an item to throw away, and silently
+    emptying a summary is worse than including a stale entry in one.
+    """
+    return entry.get("is_today") is not False
+
 
 def _classify_summary_limit(entry: dict) -> int:
     """How much of an item's summary stage 2c/2d gets to see.
@@ -504,13 +541,56 @@ def validate_telegram_decisions(decisions: dict, known_ids: set[str]) -> tuple[l
     return accepted, problems
 
 
-def _clean_paragraphs(value) -> tuple[list[dict], list[str]]:
-    """Normalise `summary` into [{text, keywords}] paragraphs.
+def _clean_paragraph_ids(value, index: int, known_ids: set[str] | None,
+                        aliases: dict[str, str] | None,
+                        problems: list[str]) -> list[str]:
+    """Resolve one paragraph's `source_ids` against the items that exist.
+
+    An unknown id is dropped and reported: it would render as a link to nothing,
+    and a summary that cites what it did not read is exactly what this field
+    exists to catch. No `known_ids` means nothing to check against (a hand-written
+    file, or a caller that did not pass an index), so the ids are kept as given.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        problems.append(f"summary {index}: source_ids is not a list")
+        return []
+    out: list[str] = []
+    for ref in value:
+        if not isinstance(ref, str):
+            problems.append(f"summary {index}: source_ids entry {ref!r} is not a string")
+            continue
+        target = ref
+        if known_ids is not None:
+            target = ref if ref in known_ids else (aliases or {}).get(ref)
+            if target is None:
+                problems.append(f"summary {index}: unknown source id {ref!r}")
+                continue
+        if target not in out:
+            out.append(target)
+    if len(out) > DIGEST_PARAGRAPH_SOURCES:
+        problems.append(f"summary {index}: source_ids trimmed to "
+                        f"{DIGEST_PARAGRAPH_SOURCES}")
+        out = out[:DIGEST_PARAGRAPH_SOURCES]
+    return out
+
+
+def _clean_paragraphs(value, known_ids: set[str] | None = None,
+                      aliases: dict[str, str] | None = None) -> tuple[list[dict], list[str]]:
+    """Normalise `summary` into [{text, keywords, source_ids}] paragraphs.
 
     A plain string is accepted as one paragraph with no keywords, so a
     hand-written or older decisions file still renders. Each paragraph carries
     the keywords that belong to it, which is what lets the page mark them in
-    place instead of leaving a word cloud floating beside the prose.
+    place instead of leaving a word cloud floating beside the prose, and the ids
+    it was written from, which is what the page puts beside it as links.
+
+    Ids are resolved here rather than in the renderer because this is where the
+    aliases are known: a paragraph may cite a message that a Telegram merge
+    absorbed, and that reference should follow the merge rather than vanish.
     """
     problems: list[str] = []
     if value is None:
@@ -534,6 +614,9 @@ def _clean_paragraphs(value) -> tuple[list[dict], list[str]]:
         if not text:
             problems.append(f"summary {index}: empty paragraph, skipped")
             continue
+        refs = _clean_paragraph_ids(
+            item.get("source_ids") if isinstance(item, dict) else None,
+            index, known_ids, aliases, problems)
         if total + len(text) > DIGEST_SUMMARY_LIMIT:
             problems.append(f"summary trimmed to {DIGEST_SUMMARY_LIMIT} characters")
             text = text[:max(0, DIGEST_SUMMARY_LIMIT - total)]
@@ -547,7 +630,8 @@ def _clean_paragraphs(value) -> tuple[list[dict], list[str]]:
             word = _clean_text(word, KEYWORD_TEXT_LIMIT)
             if word and word not in marks:
                 marks.append(word)
-        out.append({"text": text, "keywords": marks[:DIGEST_PARAGRAPH_KEYWORDS]})
+        out.append({"text": text, "keywords": marks[:DIGEST_PARAGRAPH_KEYWORDS],
+                    "source_ids": refs})
         if len(out) >= DIGEST_PARAGRAPH_LIMIT:
             if index + 1 < len(value):
                 problems.append(f"summary trimmed to {DIGEST_PARAGRAPH_LIMIT} paragraphs")
@@ -578,7 +662,7 @@ def validate_digest_decisions(decisions: dict, known_ids: set[str],
     if decisions.get("schema") not in (None, DIGEST_SCHEMA):
         problems.append(f"unexpected schema {decisions.get('schema')!r}")
 
-    paragraphs, notes = _clean_paragraphs(decisions.get("summary"))
+    paragraphs, notes = _clean_paragraphs(decisions.get("summary"), known_ids, aliases)
     problems += notes
 
     keywords: list[dict] = []
@@ -611,10 +695,12 @@ def validate_digest_decisions(decisions: dict, known_ids: set[str],
         problems.append(f"keywords trimmed from {len(keywords)} to {KEYWORD_LIMIT}")
         keywords = keywords[:KEYWORD_LIMIT]
 
-    # Audit only: these ids are not rendered, they exist so a reference to an
-    # item that never existed can be told apart from a claim that is merely
-    # unsupported.
-    source_ids: list[str] = []
+    # The paragraph ids are the whole audit trail now: they are what the page
+    # draws, so they are checked where they are read rather than in a separate
+    # top-level list that nothing renders. A day-wide list is still accepted
+    # from an older decisions file, but only as a fallback for paragraphs that
+    # carry none.
+    leftover: list[str] = []
     for ref in decisions.get("source_ids") or []:
         if not isinstance(ref, str):
             problems.append(f"source_ids: {ref!r} is not a string")
@@ -623,8 +709,11 @@ def validate_digest_decisions(decisions: dict, known_ids: set[str],
         if target is None:
             problems.append(f"source_ids: unknown id {ref!r}")
             continue
-        if target not in source_ids:
-            source_ids.append(target)
+        if target not in leftover:
+            leftover.append(target)
+    if leftover and not any(p["source_ids"] for p in paragraphs):
+        problems.append("source_ids: given only at the top level; "
+                        "the prompt now expects them per paragraph")
 
     return {
         "schema": DIGEST_SCHEMA,
@@ -632,7 +721,6 @@ def validate_digest_decisions(decisions: dict, known_ids: set[str],
         "model": _clean_text(decisions.get("model"), 120),
         "summary": paragraphs,
         "keywords": keywords,
-        "source_ids": source_ids,
         "stats_note": _clean_text(decisions.get("stats_note"), 300),
     }, problems
 
@@ -756,38 +844,55 @@ def apply_telegram_decisions(items: list[dict], actions: list[dict]) -> tuple[li
     return output, report
 
 
-def apply_digest_decisions(digest: dict, item_index: dict[str, dict]) -> dict:
-    """Resolve the audit ids into a render-ready form. No deletion.
+def _resolve_ref(ref: str, item_index: dict[str, dict]) -> dict | None:
+    """One id turned into everything the page needs to draw a link for it."""
+    entry = item_index.get(ref)
+    if not entry:
+        return None
+    extra = entry.get("extra") or {}
+    return {
+        "id": ref,
+        "source": entry.get("source"),
+        "source_name": entry.get("source_name"),
+        "channel": extra.get("channel"),
+        "channel_title": extra.get("channel_title"),
+        "title": entry.get("title"),
+        "url": entry.get("url"),
+    }
 
-    Much smaller than it was: the briefing no longer names items, so there are
-    no cards to build. What is left is resolving `source_ids` to titles so the
-    report can say what the summary was written from.
+
+def apply_digest_decisions(digest: dict, item_index: dict[str, dict]) -> dict:
+    """Resolve each paragraph's ids into links the page can draw.
+
+    Resolved here rather than in the renderer: the renderer has no item index,
+    and turning an id into a source name, a title and a URL would otherwise mean
+    reading every processed source file back in at render time.
+
+    `sources` stays a flat list of everything the summary drew on, in first-use
+    order, because the archive and the run report both want the day-wide view.
+    The per-paragraph lists are what the page draws.
     """
-    audited = []
-    for ref in digest.get("source_ids") or []:
-        entry = item_index.get(ref)
-        if not entry:
-            continue
-        extra = entry.get("extra") or {}
-        audited.append({
-            "id": ref,
-            "source": entry.get("source"),
-            "source_name": entry.get("source_name"),
-            "channel": extra.get("channel"),
-            "channel_title": extra.get("channel_title"),
-            "title": entry.get("title"),
-            "url": entry.get("url"),
-        })
+    paragraphs = []
+    flat: list[dict] = []
+    seen: set[str] = set()
+    for para in digest.get("summary") or []:
+        refs = [r for r in (_resolve_ref(ref, item_index)
+                            for ref in para.get("source_ids") or []) if r]
+        for ref in refs:
+            if ref["id"] not in seen:
+                seen.add(ref["id"])
+                flat.append(ref)
+        paragraphs.append({**para, "refs": refs})
 
     return {
         "schema": digest.get("schema"),
         "day": digest.get("day"),
         "model": digest.get("model"),
-        # Already [{text, keywords}] by the time it gets here; validation owns
-        # that shape so the renderer does not have to guess at it.
-        "summary": digest.get("summary") or [],
+        # Already [{text, keywords, source_ids}] by the time it gets here;
+        # validation owns that shape so the renderer does not guess at it.
+        "summary": paragraphs,
         "keywords": digest.get("keywords") or [],
-        "sources": audited,
+        "sources": flat,
         "stats_note": digest.get("stats_note"),
     }
 

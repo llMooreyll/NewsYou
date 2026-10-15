@@ -501,13 +501,14 @@ def main() -> int:
             # Audit, not validation: it says how many of the items the summary
             # claims to draw on actually exist, not whether it used them well.
             "audited": len(panel["sources"]),
-            "audit_requested": len(digest.get("source_ids") or []),
+            "paragraphs_with_sources": sum(1 for p in panel["summary"] if p.get("refs")),
             "rejected": len(problems),
             "problems": problems,
         }
+        cited = sum(len(p.get("refs") or []) for p in panel["summary"])
         digest_step.done("warn" if problems else "ok",
                          f"{len(panel['keywords'])} 关键词 · "
-                         f"{len(panel['sources'])}/{len(digest.get('source_ids') or [])} 引用"
+                         f"{len(panel['summary'])} 段 · {cited} 条引用"
                          + (f" · {len(problems)} 拒绝" if problems else ""))
         for problem in problems[:10]:
             output.warn(f"汇总: {problem}")

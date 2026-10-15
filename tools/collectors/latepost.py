@@ -43,7 +43,8 @@ def _list(pages: int = 1, per_page: int = 20) -> list[dict]:
         out.extend(rows)
     return out
 
-def collect(limit: int = 15, fulltext=base.FULLTEXT_DEFAULT, engine: str = "legacy", **_):
+def collect(limit: int = 15, fulltext=base.FULLTEXT_DEFAULT, engine: str = "legacy",
+            start=None, **_):
     rows = _list(pages=max(1, (limit // 20) + 1), per_page=20)
     now = base.datetime.now(base.CST)
     items: list[dict] = []
@@ -64,7 +65,7 @@ def collect(limit: int = 15, fulltext=base.FULLTEXT_DEFAULT, engine: str = "lega
                    "is_exclusive": row.get("is_dj") == "1"},
         ))
 
-    for entry in base.fulltext_targets(items, fulltext):
+    for entry in base.fulltext_targets(items, fulltext, start):
         scope = base.fulltext_scope_label(entry)
         try:
             detail = base.fetch(entry["url"], extra_trust=True)

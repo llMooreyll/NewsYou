@@ -126,6 +126,40 @@ def _unit_total(report: dict) -> int:
             return len(report[group])
     return 0
 
+def day_start_of(value) -> int:
+    """The hour a source's day begins, from a config value.
+
+    Absent or 0 means midnight. A value that is not an hour of the day is a
+    configuration error, and saying so beats quietly summarising the wrong
+    window.
+    """
+    if value in (None, "", False):
+        return 0
+    try:
+        hour = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"day start hour must be 0-23, got {value!r}") from None
+    if not 0 <= hour <= 23:
+        raise ValueError(f"day start hour must be 0-23, got {hour}")
+    return hour
+
+def _day_starts(cfg) -> dict[str, int]:
+    """source -> the hour its day begins, including the grace offset.
+
+    The grace exists because a source's publication time is a habit, not a
+    contract: linux.do is listed at 21 and publishes at 22:00, and an edition
+    half an hour late must not fall out of its own day. Only sources that
+    actually have a start hour get the offset, so a midnight source stays at
+    midnight rather than silently becoming 23:00 the day before.
+    """
+    raw = {str(k): v for k, v in (cfg.get("sources.day_start_hour") or {}).items()}
+    grace = int(cfg.get("sources.day_start_grace_hours") or 0)
+    out: dict[str, int] = {}
+    for name, value in raw.items():
+        hour = day_start_of(value)
+        out[name] = (hour - grace) % 24 if hour else 0
+    return out
+
 def _collector_notes(report: dict) -> list[str]:
     """What a collector's own report has to say, in the caller's words.
 
@@ -309,6 +343,7 @@ def main() -> int:
     args.aidir = Path(cfg.get("paths.ai"))
     args.channels = list(cfg.get("telegram.channels") or [])
     args.source_nature, args.unit_nature = _nature_maps(cfg)
+    args.day_starts = _day_starts(cfg)
     args.hn_feed = cfg.get("hackernews.feed")
     args.v2ex_sort = cfg.get("v2ex.sort")
     args.reddit_subs = list(cfg.get("reddit.subreddits") or [])
@@ -388,8 +423,19 @@ def main() -> int:
     statuses: dict[str, dict] = {}
     failures: dict[str, str] = {}
     breakdown: list[tuple[str, str]] = []
+    # Sources run concurrently, so each one's results land in its own slot and
+    # are read back in `targets` order. The output stays a function of the
+    # configuration, not of which site answered first.
+    collected: dict[str, dict] = {}
 
-    for index, name in enumerate(targets, 1):
+    def gather(index: int, name: str) -> None:
+        """Fetch one source and record everything the caller needs to report it.
+
+        Runs in a worker thread, so it touches only its own locals plus the
+        `collected` slot reserved for it. Notes and remarks are returned to the
+        main thread rather than printed here: the live region belongs to one
+        thread, and a note written from a worker would interleave with it.
+        """
         step = console.Step(report, name, index, len(targets), name)
         try:
             module = registry.get(name)
@@ -411,22 +457,24 @@ def main() -> int:
                     entry["source_name"] = args.labels[name]
             for entry in items:
                 base.stamp_now(entry)
-            base.mark_today(items, today)
+            # The window is per source: linux.do's day starts the previous
+            # evening, so "today" is not one date for the whole run.
+            start, now = base.day_window(args.day_starts.get(name, 0))
+            base.mark_today(items, start, now)
             items, notes = _postprocess(name, items, args, args.outdir)
 
-            results[name] = items
-            statuses[name] = base.source_status(items, today)
+            status = base.source_status(items, start, now)
             # A collector may expose a structured report (telegram: per channel,
             # reddit: per subreddit), so a partial failure is recorded rather
             # than only mentioned in passing.
             collector_report = module.last_report() if hasattr(module, "last_report") else {}
             if collector_report:
-                statuses[name]["collector_report"] = collector_report
+                status["collector_report"] = collector_report
             # Facts about a source that no item can carry. sspai reports
             # whether today's 派早报 exists at all; with no brief there is no
             # item to read it from, and the page needs to say so.
             if hasattr(module, "last_state"):
-                statuses[name].update(module.last_state())
+                status.update(module.last_state())
 
             # Every unit the collector knows about, content or not: a
             # sources.units name is only a typo if the collector has never heard
@@ -439,7 +487,6 @@ def main() -> int:
             notes += _collector_notes(collector_report)
 
             broken = _collector_failures(collector_report)
-            breakdown.extend((f"{name}/{unit}", message) for unit, message in broken)
             if broken:
                 units = _unit_total(collector_report)
                 notes.append(f"{len(broken)}/{units} 个单元失败" if units
@@ -450,18 +497,52 @@ def main() -> int:
             # Nothing came back and the collector said why: a failed source even
             # though collect() itself returned cleanly.
             state = "fail" if (not items and broken) else ("warn" if broken else "ok")
-            if state == "fail":
-                failures[name] = f"{len(broken)} 个单元失败"
-            step.done(state, _source_detail(statuses[name], len(items), notes))
-            for line in remarks[:REMARK_LIMIT]:
-                report.note("  " + report.style(line, "dim"))
-            if len(remarks) > REMARK_LIMIT:
-                report.note(report.style(f"  …还有 {len(remarks) - REMARK_LIMIT} 条提示",
-                                         "dim"))
+            detail = _source_detail(status, len(items), notes)
+            step.done(state, detail)
+            collected[name] = {"items": items, "status": status, "remarks": remarks,
+                               "broken": broken, "state": state, "detail": detail}
         except Exception as exc:  # noqa: BLE001
-            failures[name] = f"{type(exc).__name__}: {exc}"
-            breakdown.append((name, failures[name]))
-            step.done("fail", failures[name])
+            failure = f"{type(exc).__name__}: {exc}"
+            step.done("fail", failure)
+            collected[name] = {"error": failure}
+
+    # Every source at once. Each talks to its own hosts, and the per-source
+    # concurrency inside a collector is unchanged, so the request rate any one
+    # site sees is exactly what it was when this loop was serial; what grows is
+    # the number of sites in flight. Wall clock becomes the slowest source
+    # rather than their sum, and Telegram — four pages across eighteen channels
+    # — is almost always that source.
+    base.parallel_map(lambda pair: gather(*pair), list(enumerate(targets, 1)),
+                      max(1, len(targets)))
+    for name in targets:
+        outcome = collected.get(name) or {"error": "source produced no result"}
+        if "error" in outcome:
+            # Already reported on its own line by `gather`; this only records it.
+            failures[name] = outcome["error"]
+            breakdown.append((name, outcome["error"]))
+            continue
+        if outcome["broken"]:
+            breakdown.extend((f"{name}/{unit}", message)
+                             for unit, message in outcome["broken"])
+        if outcome["state"] == "fail":
+            failures[name] = f"{len(outcome['broken'])} 个单元失败"
+        results[name] = outcome["items"]
+        statuses[name] = outcome["status"]
+        for line in outcome["remarks"][:REMARK_LIMIT]:
+            report.note("  " + report.style(line, "dim"))
+        extra = len(outcome["remarks"]) - REMARK_LIMIT
+        if extra > 0:
+            report.note(report.style(f"  …还有 {extra} 条提示", "dim"))
+
+    for name in targets:
+        if name in collected:
+            results[name] = collected[name]["items"]
+            statuses[name] = collected[name]["status"]
+            for line in collected[name]["remarks"][:REMARK_LIMIT]:
+                report.note("  " + report.style(line, "dim"))
+            extra = len(collected[name]["remarks"]) - REMARK_LIMIT
+            if extra > 0:
+                report.note(report.style(f"  …还有 {extra} 条提示", "dim"))
 
     if args.list:
         for name in targets:

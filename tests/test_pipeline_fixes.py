@@ -185,15 +185,17 @@ class ItemIds(unittest.TestCase):
         self.assertEqual(ai_stage.item_id(a), ai_stage.item_id(b))
 
     def test_old_ids_still_resolve(self):
-        """An alias resolves through the audit list, which is the only place an
-        id is still checked now that the briefing is prose."""
+        """A legacy id resolves through the aliases, wherever it is cited. The
+        summary's per-paragraph ids are the only place an id is checked now that
+        the briefing is prose."""
         entry = _item("zhihu", "问题", "https://www.zhihu.com/question/1")
         index, aliases = ai_stage.build_item_index({"zhihu": [entry]})
         old = ai_stage.legacy_item_id(entry)
         digest, problems = ai_stage.validate_digest_decisions(
-            {"summary": "s", "source_ids": [old]}, set(index), aliases)
+            {"summary": [{"text": "s", "source_ids": [old]}]}, set(index), aliases)
         self.assertEqual(problems, [])
-        self.assertEqual(digest["source_ids"], [ai_stage.item_id(entry)])
+        self.assertEqual(digest["summary"][0]["source_ids"],
+                         [ai_stage.item_id(entry)])
 
 
 class TelegramMerge(unittest.TestCase):

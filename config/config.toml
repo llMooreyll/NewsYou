@@ -115,6 +115,11 @@ enabled = []
 # waiting to every run. Same deal — delete the name to bring it back.
 disabled = ["weibo", "reddit"]
 
+# Hours subtracted from a source's `day_start_hour`. linux.do is listed at 21
+# and actually publishes at 22:00, and this is why: an edition that slips half
+# an hour late must not fall out of its own day.
+day_start_grace_hours = 1
+
 # Per-source item limits.
 [sources.limits]
 sspai = 20
@@ -164,6 +169,25 @@ longform = ["sspai", "latepost", "geekpark", "ruanyifeng", "anywayfm"]
 "telegram:wxbyg" = "longform"
 "telegram:zhihu_bazaar" = "longform"
 "linuxdo:站外速览" = "news"
+
+# What counts as "today" for a source, as the hour its day begins in
+# Asia/Shanghai. A source absent here starts at midnight, which is what most of
+# them want.
+#
+# linux.do is the reason this exists. It publishes its 晚报 as one batch at
+# 22:00, so the previous evening's edition is the one that belongs to today —
+# judged against midnight, every item it has is yesterday's and the whole source
+# drops out of the daily summary. Listing 21 rather than 22 is deliberate: the
+# publication time is a habit, not a contract, and an edition running half an
+# hour late must not fall out of its own day.
+#
+# This window is what "today" means everywhere it is asked: which items reach
+# the summary and the classification, and which get their full text fetched.
+[sources.day_start_hour]
+linuxdo = 21
+
+# Hours subtracted from a start hour above. A source with no start hour is
+# unaffected, so midnight stays midnight.
 
 # Panel display names.
 [sources.labels]

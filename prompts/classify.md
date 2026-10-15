@@ -74,8 +74,10 @@ What matters:
   (`少数派`) and a format (`长文`) in the same answer. Pick the axis and stay on
   it.
 - **No numbering, no dates, no source names.** `AI` not `1. AI` or `10月13日 AI`.
-- **3 to 8 categories is the useful range.** Ten is the ceiling; if you find
-  yourself with more, you are splitting hairs.
+- **3 to 8 categories is the useful range, and 8 is a hard ceiling.** The
+  script trims anything past it into 其他, so a ninth category is not a finer
+  answer — it is a worse one. If you find yourself with more than eight, you are
+  splitting hairs: merge the two that a reader would scan as one subject.
 
 Day to day, the *names* may differ — that is expected and fine. What should be
 stable is the shape: a reader should see roughly the same kind of grouping every

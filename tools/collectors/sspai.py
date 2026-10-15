@@ -258,7 +258,7 @@ def brief_state(issues: list[dict], today: datetime | None = None) -> str:
 # --------------------------------------------------------------------------
 
 def collect(limit: int = 20, fulltext=base.FULLTEXT_DEFAULT, engine: str = "legacy",
-            workers: int = base.DEFAULT_WORKERS, **_):
+            workers: int = base.DEFAULT_WORKERS, start=None, **_):
     try:
         items = _from_api(limit)
     except (FetchError, json.JSONDecodeError, ValueError) as exc:
@@ -281,7 +281,7 @@ def collect(limit: int = 20, fulltext=base.FULLTEXT_DEFAULT, engine: str = "lega
     # Full text: 派早报 always (splitting depends on its sections), others by
     # policy. `latest` would otherwise pick a 派评 item with no body support.
     targets = {id(e) for e in latest}
-    targets |= {id(e) for e in base.fulltext_targets(rest, fulltext)}
+    targets |= {id(e) for e in base.fulltext_targets(rest, fulltext, start)}
 
     def fetch(entry: dict) -> tuple[dict, dict | None]:
         """One body, fetched without touching the item yet.

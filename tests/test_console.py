@@ -18,14 +18,24 @@ import tempfile
 import time
 import unittest
 import unittest.mock
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 import ai_model                                             # noqa: E402
+import ai_stage                                             # noqa: E402
 import collect                                              # noqa: E402
+import config                                               # noqa: E402
 import console                                              # noqa: E402
+import render_digest                                        # noqa: E402
+from collectors import base                                 # noqa: E402
+from collectors.base import CST                             # noqa: E402
+
+
+def _cfg():
+    return config.load(ROOT / "config" / "config.toml")
 
 _CURSOR = re.compile(r"\x1b\[(\d*)([AB])")
 _CLEAR = re.compile(r"\x1b\[2?K")
@@ -425,3 +435,171 @@ class CollectorNotes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class DayWindow(unittest.TestCase):
+    """What counts as "today" is per source, because one natural day does not
+    fit every source: linux.do publishes its 晚报 as one batch at 22:00."""
+
+    def test_a_midnight_source_starts_at_midnight(self):
+        now = datetime(2026, 10, 15, 13, 51, tzinfo=CST)
+        start, end = base.day_window(0, now)
+        self.assertEqual(start, datetime(2026, 10, 15, 0, 0, tzinfo=CST))
+        self.assertEqual(end, now)
+
+    def test_a_non_zero_hour_reaches_back_to_the_previous_evening(self):
+        now = datetime(2026, 10, 15, 13, 51, tzinfo=CST)
+        start, _ = base.day_window(20, now)
+        self.assertEqual(start, datetime(2026, 10, 14, 20, 0, tzinfo=CST))
+
+    def test_before_the_hour_the_window_opens_today_instead(self):
+        """At 19:00 with hour=20, the window that contains now starts at 20:00
+        *yesterday*; nothing from today has happened yet."""
+        now = datetime(2026, 10, 15, 19, 0, tzinfo=CST)
+        start, _ = base.day_window(20, now)
+        self.assertEqual(start, datetime(2026, 10, 14, 20, 0, tzinfo=CST))
+
+    def test_the_previous_evenings_batch_counts_as_today(self):
+        """The case this exists for: a 22:00 batch is inside the window opened
+        at 20:00 the same day, and was outside the midnight one."""
+        now = datetime(2026, 10, 15, 13, 51, tzinfo=CST)
+        items = [{"published_at": "2026-10-14T22:00:00+08:00"}]
+        base.mark_today(items, *base.day_window(20, now))
+        self.assertTrue(items[0]["is_today"])
+        base.mark_today(items, *base.day_window(0, now))
+        self.assertFalse(items[0]["is_today"])
+
+    def test_an_item_dated_in_the_future_is_not_today(self):
+        """A source ahead of the clock has a clock problem; counting it as today
+        would hide that rather than show it."""
+        now = datetime(2026, 10, 15, 13, 0, tzinfo=CST)
+        items = [{"published_at": "2026-10-15T18:00:00+08:00"}]
+        base.mark_today(items, *base.day_window(0, now))
+        self.assertFalse(items[0]["is_today"])
+
+    def test_the_grace_moves_a_start_hour_back(self):
+        self.assertEqual(collect.day_start_of(21), 21)
+        self.assertEqual((21 - 1) % 24, 20)
+
+    def test_a_midnight_source_keeps_midnight_under_the_grace(self):
+        """Only a source with a start hour gets the offset; otherwise midnight
+        would silently become 23:00 the day before."""
+        starts = collect._day_starts(_cfg())
+        self.assertEqual(starts.get("linuxdo"), 20)
+        self.assertNotIn("sspai", starts)
+
+
+class SummaryWindow(unittest.TestCase):
+    """The classification and the summary share one window; they differ only in
+    which natures they take."""
+
+    def _item(self, source, ident, nature, today):
+        return {"source": source, "id": ident, "nature": nature,
+                "is_today": today, "title": ident, "url": "https://x/1"}
+
+    def test_a_stale_item_is_left_out_of_the_categories(self):
+        items = [self._item("solidot", "s:1", "news", False),
+                 self._item("solidot", "s:2", "news", True)]
+        groups = ai_stage.classify_groups({"solidot": items})
+        self.assertEqual([e["id"] for e in groups["news"]], ["s:2"])
+
+    def test_a_stale_long_read_is_left_out_of_the_summary(self):
+        """A weekly column and a five-day-old 派评 are both in the fetch and
+        neither is what happened today."""
+        items = [self._item("ruanyifeng", "r:1", "longform", False),
+                 self._item("latepost", "l:1", "longform", True)]
+        built = ai_stage.build_digest_input({"ruanyifeng": items[:1], "latepost": items[1:]},
+                                           {}, "2026-10-15")
+        self.assertEqual(built["sources"]["ruanyifeng"]["count"], 0)
+        self.assertEqual(built["sources"]["latepost"]["count"], 1)
+
+    def test_a_short_item_from_today_reaches_both(self):
+        items = [self._item("v2ex", "v:1", "discussion", True)]
+        groups = ai_stage.classify_groups({"v2ex": items})
+        built = ai_stage.build_digest_input({"v2ex": items}, {}, "2026-10-15")
+        self.assertEqual(len(groups["discussion"]), 1)
+        self.assertEqual(built["sources"]["v2ex"]["count"], 1)
+
+    def test_an_unstamped_item_is_kept(self):
+        """The stamp is written at collection time, so its absence means older
+        data rather than an item to throw away — silently emptying a summary is
+        worse than including a stale entry."""
+        items = [{"source": "v2ex", "id": "v:1", "nature": "discussion",
+                  "title": "t", "url": "https://x/1"}]
+        self.assertEqual(len(ai_stage.classify_groups({"v2ex": items})["discussion"]), 1)
+        self.assertEqual(
+            ai_stage.build_digest_input({"v2ex": items}, {}, "2026-10-15")
+            ["sources"]["v2ex"]["count"], 1)
+
+    def test_longform_is_never_classified(self):
+        items = [self._item("latepost", "l:1", "longform", True)]
+        groups = ai_stage.classify_groups({"latepost": items})
+        self.assertEqual(groups["news"], [])
+        self.assertEqual(groups["discussion"], [])
+
+
+class SourceLabels(unittest.TestCase):
+    """The links drawn beside a summary paragraph."""
+
+    def _panel(self, summary, index):
+        return ai_stage.apply_digest_decisions({"summary": summary}, index)
+
+    def test_each_paragraph_resolves_its_own_links(self):
+        index = {"a:1": {"source": "sspai", "source_name": "少数派", "title": "甲",
+                         "url": "https://a/1", "extra": {}},
+                 "b:2": {"source": "v2ex", "source_name": "V2EX", "title": "乙",
+                         "url": "https://b/2", "extra": {}}}
+        panel = self._panel([{"text": "一段", "source_ids": ["a:1"]},
+                             {"text": "二段", "source_ids": ["b:2"]}], index)
+        self.assertEqual([r["id"] for r in panel["summary"][0]["refs"]], ["a:1"])
+        self.assertEqual([r["id"] for r in panel["summary"][1]["refs"]], ["b:2"])
+
+    def test_a_flat_list_is_still_available_for_the_report(self):
+        index = {"a:1": {"source_name": "少数派", "title": "甲", "url": "https://a/1",
+                         "extra": {}},
+                 "b:2": {"source_name": "V2EX", "title": "乙", "url": "https://b/2",
+                         "extra": {}}}
+        panel = self._panel([{"text": "一段", "source_ids": ["a:1", "b:2"]},
+                             {"text": "二段", "source_ids": ["a:1"]}], index)
+        self.assertEqual([r["id"] for r in panel["sources"]], ["a:1", "b:2"])
+
+    def test_a_dangling_id_is_dropped_rather_than_drawn_as_a_dead_link(self):
+        panel = self._panel([{"text": "一段", "source_ids": ["nope"]}], {})
+        self.assertEqual(panel["summary"][0]["refs"], [])
+
+    def test_a_paragraph_with_no_ids_gets_no_labels(self):
+        panel = self._panel([{"text": "一段"}], {})
+        self.assertEqual(panel["summary"][0]["refs"], [])
+
+    def test_the_paragraph_and_its_labels_are_one_element(self):
+        """A tooltip that vanishes on mouseleave cannot be clicked, so the
+        labels live inside the paragraph's own block."""
+        index = {"a:1": {"source": "sspai", "source_name": "少数派", "title": "甲",
+                         "url": "https://a/1", "extra": {}}}
+        panel = self._panel([{"text": "一段", "source_ids": ["a:1"]}], index)
+        html = render_digest._summary_block(panel["summary"])
+        self.assertIn('class="dg-hl', html)
+        block = html[html.index('class="dg-hl'):]
+        self.assertIn("dg-srcs", block)
+        self.assertIn("少数派", block)
+        self.assertIn("https://a/1", block)
+
+    def test_the_label_carries_the_title_for_hover(self):
+        index = {"a:1": {"source_name": "少数派", "title": "被引用的标题",
+                         "url": "https://a/1", "extra": {}}}
+        panel = self._panel([{"text": "一段", "source_ids": ["a:1"]}], index)
+        html = render_digest._summary_block(panel["summary"])
+        self.assertIn("被引用的标题", html)
+
+
+class CategoryCeiling(unittest.TestCase):
+    def test_the_ceiling_is_eight(self):
+        self.assertEqual(ai_stage.CATEGORY_LIMIT, 8)
+
+    def test_everything_past_the_ceiling_folds_into_the_fallback(self):
+        categories = [{"name": f"类{i}", "summary": "", "item_ids": [f"i:{i}", f"j:{i}"]}
+                      for i in range(12)]
+        items = [{"id": f"i:{i}", "nature": "news"} for i in range(12)] + \
+                [{"id": f"j:{i}", "nature": "news"} for i in range(12)]
+        kept, problems = ai_stage.finalize_categories(categories, items, "news")
+        self.assertEqual(len([c for c in kept if c["name"] != ai_stage.CATEGORY_FALLBACK]), 8)
+        self.assertTrue(any("trimmed" in p for p in problems))

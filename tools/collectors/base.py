@@ -340,17 +340,47 @@ def stamp_now(record: dict) -> dict:
 FULLTEXT_DEFAULT = "today"
 FULLTEXT_MODES = ("today", "latest", "all", "none")
 
-def mark_today(items: list[dict], today=None) -> None:
-    """Annotate every item with whether it was published on the current CST day."""
-    today = today or datetime.now(CST).date()
+def mark_today(items: list[dict], start, now=None) -> None:
+    """Annotate every item with whether it falls in the current window.
+
+    `start` is the moment the source's day began, not necessarily midnight — see
+    `day_window`. An item stamped in the future is outside the window: a source
+    that dates things ahead of the clock is a source with a clock problem, and
+    counting it as today would hide that.
+    """
+    now = now or datetime.now(CST)
     for entry in items:
         published = to_cst(entry.get("published_at"))
-        entry["is_today"] = bool(published and published.date() == today)
+        entry["is_today"] = bool(published and start <= published <= now)
 
-def fulltext_targets(items: list[dict], mode=FULLTEXT_DEFAULT, today=None) -> list[dict]:
+def day_window(hour: int = 0, now: datetime | None = None) -> tuple[datetime, datetime]:
+    """The (start, now) window that counts as "today" for a source.
+
+    A single natural day does not fit every source. linux.do publishes its 晚报
+    as one batch at 22:00, so the previous evening's edition is the one that
+    belongs to today; judged against midnight, every item it has is yesterday's
+    and a daily summary loses the source entirely.
+
+    A non-zero hour makes the window span two calendar dates: at 09:00 on the
+    15th with hour=21 it opens at 21:00 on the 14th and runs to now. The end is
+    `now` rather than a matching hour tomorrow, so an item dated in the future is
+    outside the window — a source ahead of the clock is a source with a clock
+    problem, and counting it as today would hide that.
+    """
+    now = now or datetime.now(CST)
+    start = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if start > now:
+        start -= timedelta(days=1)
+    return start, now
+
+
+def fulltext_targets(items: list[dict], mode=FULLTEXT_DEFAULT, start=None,
+                     now: datetime | None = None) -> list[dict]:
     """Return the items that should receive full text under the given policy."""
-    today = today or datetime.now(CST).date()
-    mark_today(items, today)
+    now = now or datetime.now(CST)
+    if start is None:
+        start, now = day_window(0, now)
+    mark_today(items, start, now)
 
     if mode is None:
         mode = FULLTEXT_DEFAULT
@@ -374,18 +404,20 @@ def fulltext_scope_label(entry: dict) -> str:
     """Human label describing why this item received full text."""
     return "today" if entry.get("is_today") else "requested"
 
-def source_status(items: list[dict], today=None) -> dict:
+def source_status(items: list[dict], start=None, now: datetime | None = None) -> dict:
     """Freshness summary for one source, rendered as a badge in the digest."""
-    today = today or datetime.now(CST).date()
-    mark_today(items, today)
+    now = now or datetime.now(CST)
+    if start is None:
+        start, now = day_window(0, now)
+    mark_today(items, start, now)
     dated = [to_cst(e.get("published_at")) for e in items]
     dated = [d for d in dated if d]
     latest = max(dated) if dated else None
     return {
-        "day": today.isoformat(),
+        "day": now.date().isoformat(),
         "updated_today": any(e.get("is_today") for e in items),
         "latest_published_at": latest.isoformat() if latest else None,
-        "staleness_days": (today - latest.date()).days if latest else None,
+        "staleness_days": (now.date() - latest.date()).days if latest else None,
         "count": len(items),
         "fulltext_fetched": sum(1 for e in items if e.get("body_text")),
     }

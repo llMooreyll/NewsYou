@@ -361,21 +361,41 @@ class DigestSummary(unittest.TestCase):
         self.assertEqual(total, ai_stage.DIGEST_SUMMARY_LIMIT)
         self.assertTrue(any("trimmed" in p for p in problems))
 
-    def test_an_unknown_audit_id_is_rejected(self):
-        digest, problems = self.validate({"summary": "s", "source_ids": ["nope"]})
-        self.assertEqual(digest["source_ids"], [])
-        self.assertTrue(any("unknown id" in p for p in problems))
+    def test_an_unknown_paragraph_id_is_rejected(self):
+        digest, problems = self.validate(
+            {"summary": [{"text": "s", "source_ids": ["nope"]}]})
+        self.assertEqual(digest["summary"][0]["source_ids"], [])
+        self.assertTrue(any("unknown source id" in p for p in problems))
 
-    def test_the_summary_survives_a_bad_audit_id(self):
-        digest, _ = self.validate({"summary": "s", "source_ids": ["a:1", "nope"]})
+    def test_the_summary_survives_a_bad_paragraph_id(self):
+        digest, _ = self.validate(
+            {"summary": [{"text": "s", "source_ids": ["a:1", "nope"]}]})
         self.assertEqual([p["text"] for p in digest["summary"]], ["s"])
-        self.assertEqual(digest["source_ids"], ["a:1"])
+        self.assertEqual(digest["summary"][0]["source_ids"], ["a:1"])
 
-    def test_an_alias_resolves_in_the_audit_list(self):
+    def test_an_alias_resolves_in_a_paragraph(self):
         digest, problems = ai_stage.validate_digest_decisions(
-            {"source_ids": ["old:1"]}, {"a:1"}, {"old:1": "a:1"})
-        self.assertEqual(digest["source_ids"], ["a:1"])
+            {"summary": [{"text": "s", "source_ids": ["old:1"]}]},
+            {"a:1"}, {"old:1": "a:1"})
+        self.assertEqual(digest["summary"][0]["source_ids"], ["a:1"])
         self.assertEqual(problems, [])
+
+    def test_a_top_level_id_list_is_a_fallback_not_the_mechanism(self):
+        """The page draws the per-paragraph ids. A day-wide list from an older
+        file still validates, but says so: nothing would render it."""
+        digest, problems = self.validate({"summary": "s", "source_ids": ["a:1"]})
+        self.assertEqual([p["text"] for p in digest["summary"]], ["s"])
+        self.assertTrue(any("per paragraph" in p for p in problems), problems)
+
+    def test_paragraph_ids_are_capped(self):
+        digest, problems = self.validate(
+            {"summary": [{"text": "s", "source_ids": ["a:1", "b:2", "a:1"]}]})
+        self.assertEqual(digest["summary"][0]["source_ids"], ["a:1", "b:2"])
+
+    def test_a_paragraph_with_no_ids_is_fine(self):
+        digest, problems = self.validate({"summary": [{"text": "s"}]})
+        self.assertEqual(digest["summary"][0]["source_ids"], [])
+        self.assertEqual([p for p in problems if "source id" in p], [])
 
     def test_the_old_schema_is_rejected_outright(self):
         """A /1 file on the same day would otherwise pass the day gate and be

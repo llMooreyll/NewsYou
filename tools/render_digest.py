@@ -249,6 +249,11 @@ def _attr(pattern, attrs: str) -> str | None:
     value = match.group(2) if match.group(2) is not None else match.group(3) or ""
     return html.unescape(value).strip()
 
+def _safe_url(url) -> str | None:
+    """A URL that is safe to put in an href, or None."""
+    text = str(url or "").strip()
+    return text if text.startswith(("http://", "https://")) else None
+
 def _safe_href(attrs: str) -> str | None:
     url = _attr(_HREF_RE, attrs)
     return url if url and url.startswith(("http://", "https://")) else None
@@ -702,16 +707,54 @@ def _mark_keywords(text: str, words) -> str:
     out.append(escaped[pos:])
     return "".join(out)
 
+def _summary_sources(refs) -> str:
+    """The source labels drawn beside one paragraph.
+
+    A source name plus the out-arrow, and nothing else: the paragraph already
+    says what happened, so the link only has to say where to check it. The title
+    is carried in `title=` and revealed on hover, which keeps the resting state
+    to a couple of short labels instead of four article headlines.
+
+    The wrapper is part of the paragraph's own block rather than a floating
+    overlay — see the CSS: a tooltip that disappears the moment the pointer
+    leaves the text cannot be clicked, which defeats the point of showing it.
+    """
+    out = []
+    for ref in refs or []:
+        name = _ref_name(ref)
+        if not name:
+            continue
+        # Same guard the other external links use: only http(s) becomes an
+        # href, so a javascript: or data: URL in the data cannot become one.
+        target = _safe_url(ref.get("url"))
+        title = ref.get("title") or name
+        if target:
+            out.append(f'<a class="dg-src" href="{esc(target)}" '
+                       f'target="_blank" rel="noopener noreferrer" '
+                       f'title="{esc(title)}">{esc(name)}{ICON["out"]}</a>')
+        else:
+            out.append(f'<span class="dg-src" title="{esc(title)}">'
+                       f'{esc(name)}{ICON["out"]}</span>')
+    return f'<span class="dg-srcs">{"".join(out)}</span>' if out else ""
+
+
 def _summary_block(summary: list[dict]) -> str:
-    """The day's summary: one paragraph per topic, keywords marked in place."""
+    """The day's summary: one paragraph per topic, keywords marked in place.
+
+    Each paragraph is its own block holding both the prose and the sources it
+    was written from. Keeping them in one element is what makes the labels
+    reachable: moving the pointer from the text onto a label never leaves the
+    block, so nothing vanishes under the cursor.
+    """
     paragraphs = []
     for index, para in enumerate(summary or [], 1):
         text = (para.get("text") or "").strip()
         if not text:
             continue
         paragraphs.append(
-            f'<p class="dg-hl rv" style="--i:{index}">'
-            f'{_mark_keywords(text, para.get("keywords"))}</p>')
+            f'<div class="dg-hl rv" style="--i:{index}">'
+            f'<p class="dg-p">{_mark_keywords(text, para.get("keywords"))}</p>'
+            f'{_summary_sources(para.get("refs"))}</div>')
     return f'<div class="dg-sum">{"".join(paragraphs)}</div>' if paragraphs else ""
 
 def render_digest_panel(digest: dict | None, categories: dict | None = None) -> str:

@@ -149,6 +149,14 @@ def source_nature_of(name: str, unit: str | None, *, source_nature: dict,
 # as weibo's.
 DEFAULT_DISABLED = ["weibo", "reddit"]
 
+# Sources whose day does not begin at midnight, as the hour it begins in
+# Asia/Shanghai. linux.do publishes its 晚报 as one batch at 22:00, so the
+# previous evening's edition is the one that belongs to today — judged against
+# midnight, every one of its items would be yesterday's and a daily summary
+# would lose the source entirely. 21 rather than 22 so that an edition running
+# half an hour late still lands inside its own day.
+DAY_START_HOUR: dict[str, int] = {"linuxdo": 21}
+
 # Sources whose `collect` accepts a fulltext policy.
 # anywayfm is absent on purpose: /now/ is a list of recommended links and its
 # "full text" would be a third-party article reached via a 301 redirect.

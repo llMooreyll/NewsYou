@@ -51,15 +51,16 @@ Return **JSON only**, no prose, no markdown fence:
   "day": "2026-10-12",
   "model": "<your model identifier>",
   "summary": [
-    {"text": "今天的主线是…，两三句话。", "keywords": ["Gemini 4", "苹果发布会"]},
-    {"text": "另一条线是…", "keywords": ["存储涨价"]}
+    {"text": "今天的主线是…，两三句话。", "keywords": ["Gemini 4", "苹果发布会"],
+     "source_ids": ["telegram:zaihuapd:44363", "sspai:6b12245f5d4224b0:3"]},
+    {"text": "另一条线是…", "keywords": ["存储涨价"],
+     "source_ids": ["latepost:9f3c8d7e6a5b4c3d"]}
   ],
   "keywords": [
     {"text": "Gemini 4", "weight": 95},
     {"text": "苹果发布会", "weight": 88},
     {"text": "存储涨价", "weight": 70}
   ],
-  "source_ids": ["telegram:zaihuapd:44363", "sspai:6b12245f5d4224b0:3"],
   "stats_note": "one short sentence about today's volume or coverage gaps"
 }
 ```
@@ -94,6 +95,19 @@ The top-level `keywords` list below is separate and different: it is the day's
 overall ranking, across all paragraphs. The words in it should be the ones that
 matter most from the paragraph keywords.
 
+**Each paragraph also carries `source_ids`**: the 2–4 items that paragraph was
+written from. The page puts them beside the paragraph, so a reader can go and
+check the claim rather than taking it on trust.
+
+- Every id must appear in the input. A made-up id is a hard error.
+- These are what you actually drew on for **that paragraph**, not for the day.
+  A paragraph with no ids gets no links, and a paragraph citing the wrong items
+  is worse than one citing none.
+- 2–4 is the useful range. More than that and the list stops being a reading
+  aid; if a paragraph rests on ten items, it is probably covering two subjects
+  and should be two paragraphs.
+- Prefer the item a reader would want: the original report over a repost of it.
+
 ### `keywords`
 
 The words a reader would use to describe today. This is a **weighted list**, not
@@ -112,14 +126,15 @@ a tag list:
 
 ### `source_ids`
 
-The items you actually drew on when writing `summary`. These are **not shown**;
-they exist so the pipeline can check that what you cite is real.
+The ids each paragraph was written from. These are drawn beside the paragraph as
+source labels, so a reader can check the claim.
 
 - Every id must appear in the input. A made-up id is a hard error.
-- 5–20 ids is the useful range: enough to show the summary rests on the day's
-  actual content, few enough to be meaningful.
+- An id that belongs to a different paragraph than the one it supports will
+  point a reader at the wrong article, so keep them with the text they belong to.
 - This is an audit trail, not a claim of completeness. You do not need to list
-  every item.
+  every item, and a paragraph that rests on the day's general shape rather than
+  on any one item may carry none.
 
 ### `stats_note`
 
