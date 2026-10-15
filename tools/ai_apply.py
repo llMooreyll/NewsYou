@@ -41,8 +41,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ai_model  # noqa: E402
 import ai_stage  # noqa: E402
 import config  # noqa: E402
+import console  # noqa: E402
 
 SKIP_FILES = {"index.json", "telegram_duplicate_groups.json"}
+
+# The two classification sides differ only by which half of the data they see;
+# these are for the progress line.
+SIDE_LABEL = {"news": "新闻", "discussion": "讨论"}
 
 
 def load_json(path: Path):
@@ -259,16 +264,33 @@ def main() -> int:
     processed: dict[str, list[dict]] = {k: list(v) for k, v in results.items()}
     report: dict = {"day": day, "generated_at": datetime.now().astimezone().isoformat()}
 
+    output = console.reporter()
+    output.banner("AI 处理", f"backend {ai_backend}",
+                  f"model {args.ai_model or '（后端默认）'}",
+                  f"day {day}", f"{len(processed)} 个源")
+
+    # Numbered up front so the counter answers "how many left", not just "which
+    # one is this". A step is only counted when it will actually run.
+    steps_total = (1 if "telegram" in processed else 0) + len(ai_stage.CLASSIFY_SIDES) + 1
+    step_no = 0
+
+    def next_step(name: str) -> console.Step:
+        nonlocal step_no
+        step_no += 1
+        return console.Step(output, name, step_no, steps_total, name, name_width=13)
+
     # ---------------- stage 2a: telegram ----------------
     # If a model backend is selected, ask it for decisions before reading them.
     # Existing decisions are reused unless --ai-force, so re-running the pipeline
     # does not spend another model call.
+    tg_step = next_step("telegram 合并") if "telegram" in processed else None
     if ai_backend != "none":
         report["ai_telegram"] = ai_model.generate(
             ai_backend, args.ai / "telegram_input.json",
             args.ai / "telegram_decisions.json", model=args.ai_model,
             timeout=args.ai_timeout, force=force_for(args.ai / "telegram_decisions.json"),
-            dry_run=args.dry_run, extra_args=args.ai_extra_args, day=day)
+            dry_run=args.dry_run, extra_args=args.ai_extra_args, day=day,
+            verbose=False, progress=tg_step.progress if tg_step else None)
 
     tg_decisions_path = args.ai / "telegram_decisions.json"
     tg_decisions = load_decisions(tg_decisions_path, day)
@@ -285,21 +307,27 @@ def main() -> int:
             "problems": problems,
             **tg_report,
         }
-        print(f"telegram: {tg_report['removed_ads']} ads removed, "
-              f"{tg_report['dropped']} dropped, "
-              f"{tg_report['merged_groups']} merged groups "
-              f"({tg_report['items_before']} -> {tg_report['items_after']} items), "
-              f"{len(problems)} rejected", file=sys.stderr)
+        if tg_step:
+            tg_step.done("warn" if problems else "ok",
+                         f"{tg_report['items_before']} → {tg_report['items_after']} 条 · "
+                         f"去广告 {tg_report['removed_ads']} · "
+                         f"丢弃 {tg_report['dropped']} · "
+                         f"合并 {tg_report['merged_groups']} 组"
+                         + (f" · {len(problems)} 拒绝" if problems else ""))
         for ad in tg_report.get("ad_details", [])[:10]:
-            print(f"  - ad [{ad['category']}] {ad['id']}: {ad.get('reason') or ''}",
-                  file=sys.stderr)
+            output.note(f"  · 广告 [{ad['category']}] {ad['id']}: {ad.get('reason') or ''}")
         for problem in problems[:10]:
-            print(f"  ! {problem}", file=sys.stderr)
+            output.warn(f"telegram 合并: {problem}")
         statuses["telegram"] = ai_stage_status(processed["telegram"], statuses.get("telegram", {}))
     else:
         report["telegram"] = {"decisions_file": None, "applied": False,
                               "note": "no telegram_decisions.json; raw messages kept"}
-        print("telegram: no decisions file, keeping raw messages", file=sys.stderr)
+        if tg_step:
+            tg_step.done("warn", "无决策文件 · 保留原始消息")
+        elif tg_decisions:
+            output.warn("有 telegram 决策文件，但本次没有采集到 telegram 数据")
+
+    output.write()
 
     # ---------------- stage 2c / 2d: classification ----------------
     # The two sides are the same prompt and the same validator over different
@@ -313,12 +341,13 @@ def main() -> int:
         for side, stem in ai_stage.CLASSIFY_SIDES
     }
 
+    classify_steps = {side: next_step(f"分类·{SIDE_LABEL.get(side, side)}")
+                      for side in classify_paths}
     for side, (input_path, _) in classify_paths.items():
         payload = ai_stage.build_classify_input(groups[side], day, side)
         if not args.dry_run:
             write_json(input_path, payload)
-        print(f"classify {side}: {payload['item_count']} items -> {input_path.name}",
-              file=sys.stderr)
+        classify_steps[side].progress(f"{payload['item_count']} 条 · {input_path.name}")
 
     if ai_backend != "none":
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -327,7 +356,8 @@ def main() -> int:
                     ai_model.generate, ai_backend, input_path, decisions_path,
                     model=args.ai_model, timeout=args.ai_timeout,
                     force=force_for(decisions_path), dry_run=args.dry_run,
-                    extra_args=args.ai_extra_args, day=day, verbose=False)
+                    extra_args=args.ai_extra_args, day=day, verbose=False,
+                    progress=classify_steps[side].progress)
                 for side, (input_path, decisions_path) in classify_paths.items()
             }
             report["classify_calls"] = {}
@@ -385,7 +415,7 @@ def main() -> int:
                 "problems": problems,
             })
             for problem in problems[:10]:
-                print(f"  ! classify {side}: {problem}", file=sys.stderr)
+                output.warn(f"分类·{SIDE_LABEL.get(side, side)}: {problem}")
 
         categories_payload["sides"][side] = {
             "nature": side,
@@ -394,15 +424,24 @@ def main() -> int:
             "categories": categories,
         }
         report["classify"][side] = side_report
-        # One line per side, whatever happened. With verbose=False on both
+        # One outcome per side, whatever happened. With verbose=False on both
         # calls, a failed side would otherwise leave nothing but its own
         # absence — which is exactly what a side with no decisions looks like.
+        # The step says which of the two it was.
+        step = classify_steps[side]
         error = ((report.get("classify_calls") or {}).get(side) or {}).get("error")
         if error:
-            print(f"  ! classify {side}: no decisions ({error})", file=sys.stderr)
-        print(f"classify {side}: {side_report['classified']}/{len(items)} categorised "
-              f"into {side_report['categories']} categories, "
-              f"{side_report['rejected']} rejected", file=sys.stderr)
+            step.done("fail", f"{len(items)} 条 · 无决策（{error}）")
+        elif not decisions:
+            step.done("warn", f"{len(items)} 条 · 无决策文件")
+        else:
+            step.done("warn" if side_report["rejected"] else "ok",
+                      f"{side_report['classified']}/{len(items)} 条 → "
+                      f"{side_report['categories']} 类"
+                      + (f" · {side_report['rejected']} 拒绝"
+                         if side_report["rejected"] else ""))
+
+    output.write()
 
     # ---------------- write processed sources ----------------
     # After 2c/2d, so every item carries the `category` it was filed under.
@@ -431,8 +470,9 @@ def main() -> int:
         write_json(args.ai / "digest_input.json", digest_input)
     report["digest_input"] = {"file": str(args.ai / "digest_input.json"),
                               "item_count": digest_input["item_count"]}
-    print(f"digest input: {digest_input['item_count']} items across "
-          f"{len(digest_input['sources'])} sources", file=sys.stderr)
+    digest_step = next_step("生成汇总")
+    digest_step.progress(f"{digest_input['item_count']} 条 · "
+                         f"{len(digest_input['sources'])} 个源")
 
     # ---------------- stage 2b: digest ----------------
     # The input now exists, so a selected backend can be asked for decisions.
@@ -441,7 +481,8 @@ def main() -> int:
             ai_backend, args.ai / "digest_input.json",
             args.ai / "digest_decisions.json", model=args.ai_model,
             timeout=args.ai_timeout, force=force_for(args.ai / "digest_decisions.json"),
-            dry_run=args.dry_run, extra_args=args.ai_extra_args, day=day)
+            dry_run=args.dry_run, extra_args=args.ai_extra_args, day=day,
+            verbose=False, progress=digest_step.progress)
 
     digest_decisions_path = args.ai / "digest_decisions.json"
     digest_decisions = load_decisions(digest_decisions_path, day)
@@ -464,21 +505,26 @@ def main() -> int:
             "rejected": len(problems),
             "problems": problems,
         }
-        print(f"digest: {len(panel['keywords'])} keywords, "
-              f"{len(panel['sources'])}/{len(digest.get('source_ids') or [])} audit ids resolved, "
-              f"{len(problems)} rejected", file=sys.stderr)
+        digest_step.done("warn" if problems else "ok",
+                         f"{len(panel['keywords'])} 关键词 · "
+                         f"{len(panel['sources'])}/{len(digest.get('source_ids') or [])} 引用"
+                         + (f" · {len(problems)} 拒绝" if problems else ""))
         for problem in problems[:10]:
-            print(f"  ! {problem}", file=sys.stderr)
+            output.warn(f"汇总: {problem}")
     else:
         report["digest"] = {"decisions_file": None, "applied": False,
                             "note": "no digest_decisions.json; no briefing panel"}
-        print("digest: no decisions file, no briefing panel", file=sys.stderr)
+        digest_step.done("warn", "无决策文件 · 不生成汇总面板")
 
     # ---------------- summary ----------------
     absent = missing_sources(args.collected, cfg, processed, skipped)
     if absent:
-        listed = ", ".join(f"{n} ({v['reason']})" for n, v in absent.items())
-        print(f"  no data today from: {listed}", file=sys.stderr)
+        output.write()
+        label = "  今日无数据的源："
+        text = "，".join(f"{name}（{info['reason']}）" for name, info in absent.items())
+        for line in console.wrap(text, output.width, label,
+                                 " " * console.display_width(label)):
+            output.write(line)
     if not args.dry_run:
         write_json(args.out / "index.json", {
             "day": day,
@@ -499,10 +545,27 @@ def main() -> int:
         })
         written.add("index.json")
         for name in remove_leftovers(args.out, written):
-            print(f"  removed {name} left by an earlier run", file=sys.stderr)
-        print(f"wrote {args.out}/", file=sys.stderr)
+            output.note(f"清理上一次运行遗留的 {name}")
     else:
-        print("dry run: nothing written", file=sys.stderr)
+        output.note("dry run：未写入任何文件")
+
+    # ---------------- what the stage amounted to ----------------
+    classified = sum(v.get("classified", 0) for v in (report.get("classify") or {}).values())
+    # Every decision this stage refused, from all three places that can refuse
+    # one. A rejected decision is not an error — the validators are strict on
+    # purpose — but it is the number worth watching.
+    rejected = (sum(v.get("rejected", 0) for v in (report.get("classify") or {}).values())
+                + (report.get("digest") or {}).get("rejected", 0)
+                + (report.get("telegram") or {}).get("rejected_actions", 0))
+    output.write()
+    output.write("  " + output.style("处理完成", "bold") + "  " +
+                 f"{digest_input['item_count']} 条输入 · 分类 {classified} 条 · "
+                 f"{rejected} 项决策被拒 · {output.elapsed()}")
+    output.write("  " + output.style("输出", "dim") + "  " +
+                 (f"{args.out}/（{len(written)} 个文件）· "
+                  f"{args.ai}/digest_input.json" if written
+                  else "无（dry run）"))
+    output.close()
 
     if args.report:
         print(json.dumps(report, ensure_ascii=False, indent=2))

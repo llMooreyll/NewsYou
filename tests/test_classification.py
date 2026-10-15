@@ -8,8 +8,6 @@ how the pipeline is meant to work without a model at all.
 """
 from __future__ import annotations
 
-import contextlib
-import io
 import re
 import sys
 import tempfile
@@ -78,18 +76,34 @@ class Stamping(unittest.TestCase):
         citation ambiguous."""
         items = [base.item("sspai", "少数派", "标题一", "https://sspai.com/post/1"),
                  base.item("sspai", "少数派", "标题二", "https://sspai.com/post/1")]
-        log = io.StringIO()
-        with contextlib.redirect_stderr(log):
-            collect._stamp_identity("sspai", items, {}, {})
+        notes = collect._stamp_identity("sspai", items, {}, {})
         self.assertNotEqual(items[0]["id"], items[1]["id"])
-        self.assertIn("duplicate id", log.getvalue())
+        self.assertIn("重复 id", " ".join(notes))
 
     def test_a_unit_name_nothing_matched_is_reported(self):
-        log = io.StringIO()
-        with contextlib.redirect_stderr(log):
-            collect._stamp_identity("linuxdo", [_item("linuxdo", "t", "https://linux.do/t/1")],
-                                    {}, {"linuxdo:站外速览": "news"})
-        self.assertIn("站外速览", log.getvalue())
+        notes = collect._stamp_identity("linuxdo", [_item("linuxdo", "t", "https://linux.do/t/1")],
+                                        {}, {"linuxdo:站外速览": "news"})
+        self.assertIn("站外速览", " ".join(notes))
+
+    def test_a_source_with_nothing_to_show_does_not_blame_the_unit_names(self):
+        """An empty run matches no unit name either, so reporting every name as
+        unmatched sends the reader after a typo that is not there. This is what
+        turned a broken telegram run into eight lines of config warnings."""
+        notes = collect._stamp_identity("linuxdo", [], {}, {"linuxdo:站外速览": "news"})
+        self.assertEqual([n for n in notes if "sources.units" in n], [])
+
+    def test_a_unit_that_was_merely_quiet_is_not_a_typo(self):
+        """A channel with no posts today still exists. The collector reports
+        every channel it knows, so a name in that set is configuration that
+        works, and only a name outside it can be a misspelling."""
+        items = [base.item("telegram", "Telegram", "标题", "https://t.me/busy/1")]
+        items[0]["extra"] = {"channel": "busy"}
+        notes = collect._stamp_identity("telegram", items, {},
+                                        {"telegram:quiet": "news", "telegram:typo": "news"},
+                                        known_units={"busy", "quiet"})
+        joined = " ".join(notes)
+        self.assertNotIn("quiet", joined)
+        self.assertIn("typo", joined)
 
 class NatureResolution(unittest.TestCase):
     def test_an_unlisted_source_is_news(self):

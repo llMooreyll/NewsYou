@@ -88,8 +88,13 @@ def _summary(content: str) -> str:
     text = re.sub(r"\[(?:link|comments)\]", "", text)
     return re.sub(r"\s+", " ", text).strip()
 
+def _announce(progress, text: str) -> None:
+    if progress is not None:
+        progress(text)
+
+
 def collect(limit: int = 75, subreddits: list[str] | None = None,
-            sort: str = "hot", delay: float = DEFAULT_DELAY, **_):
+            sort: str = "hot", delay: float = DEFAULT_DELAY, progress=None, **_):
     """Each subreddit contributes its whole feed (25 posts).
 
     `limit` therefore has to cover every subreddit — it is a ceiling on the
@@ -98,23 +103,30 @@ def collect(limit: int = 75, subreddits: list[str] | None = None,
     subs = list(subreddits or DEFAULT_SUBREDDITS)
     items: list[dict] = []
     report: dict[str, dict] = {}
+    failures: list[str] = []
 
     for index, sub in enumerate(subs):
         if index and delay:
+            # The wait is the price of this source, so it is reported rather
+            # than slept through: a silent minute is indistinguishable from a
+            # hang, and the reason for it is the only interesting part.
+            _announce(progress, f"等待 {delay:.0f}s（速率限制）· "
+                                f"{index}/{len(subs)} 板块")
             time.sleep(delay)
+        _announce(progress, f"r/{sub} · {index + 1}/{len(subs)} 板块")
         url = FEED_URL.format(sub=sub, sort=sort)
         try:
             raw = base.fetch(url)
             entries = base_parse(raw)
         except base.FetchError as exc:
-            print(f"  ! reddit r/{sub} failed: {exc}", file=sys.stderr)
             report[sub] = {"ok": False, "error": str(exc), "fetched": 0}
+            failures.append(f"r/{sub}: {exc}")
             continue
         if not entries:
             # A 429 leaves the body empty rather than raising, so an empty parse
             # is most often throttling and is worth saying out loud.
-            print(f"  ! reddit r/{sub}: feed empty (rate limited?)", file=sys.stderr)
             report[sub] = {"ok": False, "error": "empty feed (rate limited?)", "fetched": 0}
+            failures.append(f"r/{sub}: feed empty (rate limited?)")
             continue
 
         for entry in entries:
@@ -142,7 +154,7 @@ def collect(limit: int = 75, subreddits: list[str] | None = None,
         report[sub] = {"ok": True, "fetched": len(entries)}
 
     _LAST_REPORT.clear()
-    _LAST_REPORT.update({"subreddits": report, "sort": sort})
+    _LAST_REPORT.update({"subreddits": report, "sort": sort, "failures": failures})
     items.sort(key=lambda e: str(e.get("published_at") or ""), reverse=True)
     return items[:limit]
 

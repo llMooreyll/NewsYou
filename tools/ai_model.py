@@ -47,8 +47,13 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import console                                             # noqa: E402
 
 DEFAULT_BACKEND = "pi"
 DEFAULT_MODEL = "deepseek-v4.1-flash"
@@ -60,6 +65,11 @@ PI_PROMPT = ("Read the `instructions` field in the input and follow it exactly. 
              "with no prose and no markdown fence.")
 
 DEFAULT_TIMEOUT = 900
+
+# How often a running model call says it is still running. The call is the
+# longest single wait in the pipeline, and the timeout is measured in minutes,
+# so a heartbeat is the difference between "working" and "hung".
+HEARTBEAT_SECONDS = 15
 
 
 # --------------------------------------------------------------------------
@@ -252,11 +262,16 @@ def generate(backend: str, input_path: Path, output_path: Path, *,
              force: bool = False, dry_run: bool = False,
              extra_args: list[str] | None = None,
              day: str | None = None,
-             verbose: bool = True) -> dict:
+             verbose: bool = True,
+             progress=None) -> dict:
     """Ask the backend for decisions and write them to `output_path`.
 
     Existing output is reused unless `force`, so re-running the pipeline does not
     silently spend another model call.
+
+    `progress` is called with a short status while the call is in flight. The
+    timeout is fifteen minutes by default, so without one a slow call is
+    indistinguishable from a stuck one until it fails.
     """
     report: dict = {"backend": backend, "input": str(input_path),
                     "output": str(output_path), "model": model, "called": False}
@@ -279,19 +294,38 @@ def generate(backend: str, input_path: Path, output_path: Path, *,
         return report
 
     input_text = input_path.read_text(encoding="utf-8")
+    budget = console.fmt_duration(timeout)
     if verbose:
         print(f"  ai: calling {backend} on {input_path.name} "
-              f"({len(input_text) / 1024:.0f} KiB){' model=' + model if model else ''}",
-              file=sys.stderr)
+              f"({len(input_text) / 1024:.0f} KiB){' model=' + model if model else ''} "
+              f"· 上限 {budget}", file=sys.stderr)
 
+    stop = threading.Event()
+    if progress is not None:
+        started = time.time()
+        progress(f"等待 {backend} 返回 · 上限 {budget}")
+
+        def beat() -> None:
+            while not stop.wait(HEARTBEAT_SECONDS):
+                progress(f"{backend} 运行中 {console.fmt_duration(time.time() - started)}"
+                         f" · 上限 {budget}")
+
+        threading.Thread(target=beat, daemon=True).start()
+
+    started = time.time()
     try:
         raw = _invoke(backend, input_text, model=model, timeout=timeout, cwd=None,
                       extra_args=extra_args)
     except ModelError as exc:
+        stop.set()
         report["error"] = str(exc)
+        report["seconds"] = round(time.time() - started, 1)
         if verbose:
-            print(f"  ! ai backend failed: {exc}", file=sys.stderr)
+            print(f"  ! ai backend failed after "
+                  f"{console.fmt_duration(time.time() - started)}: {exc}", file=sys.stderr)
         return report
+    stop.set()
+    report["seconds"] = round(time.time() - started, 1)
 
     parsed = extract_json(raw)
     if parsed is None:

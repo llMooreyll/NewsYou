@@ -48,36 +48,38 @@ help:
 	@echo "overrides: CONFIG=$(CONFIG) FULLTEXT= AI= AI_MODEL="
 
 setup:
-	python3 -m venv .venv
-	$(PY) -m pip install --upgrade pip
-	$(PY) -m pip install -r requirements.txt
+	@python3 -m venv .venv
+	@$(PY) -m pip install --upgrade pip
+	@$(PY) -m pip install -r requirements.txt
 
 check:
-	$(PY) -c "import trafilatura, feedparser; print('modern engine: ok')"
-	$(PY_SYS) -c "import sys; sys.path.insert(0,'tools'); \
+	@$(PY) -c "import trafilatura, feedparser; print('modern engine: ok')"
+	@$(PY_SYS) -c "import sys; sys.path.insert(0,'tools'); \
 from collectors import extract as ex; print('legacy engine: ok')"
 
 test:
-	$(PY) -m unittest discover -s tests -v
+	@$(PY) -m unittest discover -s tests -v
 
 config:
-	$(PY) tools/collect.py --show-config $(CONFIG_ARG)
+	@$(PY) tools/collect.py --show-config $(CONFIG_ARG)
 
+# Every recipe below is silent. The tools print their own progress and summary,
+# so echoing the command line as well only buries the output that matters.
 collect:
-	$(PY) tools/collect.py --all $(CONFIG_ARG) $(FULLTEXT_ARG) \
+	@$(PY) tools/collect.py --all $(CONFIG_ARG) $(FULLTEXT_ARG) \
 		--outdir data/collected --aidir data/ai
 
 ai:
-	$(PY) tools/ai_apply.py --collected data/collected --ai data/ai \
+	@$(PY) tools/ai_apply.py --collected data/collected --ai data/ai \
 		--out data/processed $(CONFIG_ARG) $(AI_ARGS)
 
 demo:
-	$(PY) tools/demo_decisions.py --collected data/collected --ai data/ai
-	$(PY) tools/ai_apply.py --collected data/collected --ai data/ai \
+	@$(PY) tools/demo_decisions.py --collected data/collected --ai data/ai
+	@$(PY) tools/ai_apply.py --collected data/collected --ai data/ai \
 		--out data/processed $(CONFIG_ARG) --ai-backend none
 
 render:
-	$(PY) tools/render_digest.py --indir data/processed \
+	@$(PY) tools/render_digest.py --indir data/processed \
 		--fallback data/collected --output site/digest.html $(CONFIG_ARG)
 
 all: collect ai render
@@ -88,14 +90,14 @@ all: collect ai render
 daily: all archive
 
 ab:
-	$(PY) tools/run_ab.py
+	@$(PY) tools/run_ab.py
 
 archive:
-	$(PY) tools/archive.py $(CONFIG_ARG) $(if $(DAY),--day $(DAY),) \
+	@$(PY) tools/archive.py $(CONFIG_ARG) $(if $(DAY),--day $(DAY),) \
 		$(if $(FORCE),--force,)
 
 clean:
-	rm -rf data/collected data/ai data/processed \
+	@rm -rf data/collected data/ai data/processed \
 		data/collected-legacy data/ai-legacy data/processed-legacy \
 		data/collected-modern data/ai-modern data/processed-modern \
 		reports

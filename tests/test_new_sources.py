@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import config  # noqa: E402
 from collectors import reddit, registry, v2ex  # noqa: E402
+from collectors import telegram  # noqa: E402
 
 # --------------------------------------------------------------------------
 # V2EX fixtures
@@ -233,6 +234,70 @@ class RedditCollect(unittest.TestCase):
         # one pause between each pair, not before the first
         self.assertEqual(slept, [60, 60])
 
+class CollectorProgress(unittest.TestCase):
+    """A slow source has to say what it is doing while it does it.
+
+    These two are the ones that can sit silent for a minute or more, so they are
+    the only collectors that take the callback.
+    """
+
+    def test_reddit_reports_each_subreddit_and_says_why_it_waits(self):
+        seen = []
+        with unittest.mock.patch.object(reddit.base, "fetch", return_value=FEED), \
+             unittest.mock.patch.object(reddit.time, "sleep"):
+            reddit.collect(subreddits=["a", "b"], delay=60, progress=seen.append)
+        self.assertTrue(any("r/a" in line for line in seen), seen)
+        self.assertTrue(any("r/b" in line for line in seen), seen)
+        # The minute of waiting is the whole reason this source is slow, so the
+        # line names the rate limit rather than just looking stuck.
+        self.assertTrue(any("速率限制" in line for line in seen), seen)
+
+    def test_reddit_works_without_the_callback(self):
+        with unittest.mock.patch.object(reddit.base, "fetch", return_value=FEED), \
+             unittest.mock.patch.object(reddit.time, "sleep"):
+            self.assertTrue(reddit.collect(subreddits=["a"], delay=0))
+
+    def test_telegram_counts_every_channel_and_names_the_failures(self):
+        seen = []
+
+        def walk(channel, pages, cursor):
+            if channel == "bad":
+                raise telegram.PreviewError("boom")
+            return []
+
+        with unittest.mock.patch.object(telegram, "walk_channel", side_effect=walk):
+            telegram.collect(day="2026-10-15", channels=["a", "bad", "b"], workers=1,
+                             progress=seen.append)
+        self.assertEqual(len(seen), 3)
+        self.assertTrue(any("3/3" in line for line in seen), seen)
+        self.assertTrue(any("1 失败" in line for line in seen), seen)
+
+    def test_a_failed_channel_is_kept_in_the_report_not_printed(self):
+        """Eighteen identical failures is one problem; the caller folds them."""
+        import io
+        import contextlib
+
+        def walk(channel, pages, cursor):
+            raise telegram.PreviewError("same error")
+
+        log = io.StringIO()
+        with unittest.mock.patch.object(telegram, "walk_channel", side_effect=walk), \
+             contextlib.redirect_stderr(log):
+            telegram.collect(day="2026-10-15", channels=["a", "b"], workers=1)
+        self.assertNotIn("same error", log.getvalue())
+        report = telegram.last_report()
+        self.assertEqual([r["error"] for r in report["channels"].values()],
+                         ["same error", "same error"])
+
+    def test_only_collectors_that_accept_progress_receive_it(self):
+        import collect
+        self.assertTrue(collect._accepts_progress(telegram))
+        self.assertTrue(collect._accepts_progress(reddit))
+        # v2ex is one request for the whole board; a progress line would never
+        # be read before it finished.
+        self.assertFalse(collect._accepts_progress(v2ex))
+
+
 class NewSourcesRegistered(unittest.TestCase):
     def test_both_are_registered_and_ordered(self):
         for name in ("v2ex", "reddit"):
@@ -257,6 +322,34 @@ class NewSourcesRegistered(unittest.TestCase):
         self.assertEqual(cfg.get("reddit.subreddits"),
                          config.defaults()["reddit"]["subreddits"])
         self.assertEqual(cfg.get("reddit.delay"), config.defaults()["reddit"]["delay"])
+
+    def test_reddit_is_switched_off_but_still_registered(self):
+        """It works; it is just two minutes of waiting per run. The collector
+        and its board both stay, so removing one name turns it back on."""
+        cfg = config.load(ROOT / "config" / "config.toml")
+        self.assertIn("reddit", cfg.get("sources.disabled"))
+        self.assertIn("weibo", cfg.get("sources.disabled"))
+        self.assertNotIn("v2ex", cfg.get("sources.disabled"))
+        self.assertIn("reddit", registry.SOURCES)
+
+    def test_the_day_choice_and_quiet_channels_live_in_the_report(self):
+        """Telegram used to print both as it went, which put raw text on top of
+        the live progress line. The caller phrases them from the report now."""
+        import contextlib
+        import io
+
+        def walk(channel, pages, cursor):
+            return []
+
+        log = io.StringIO()
+        with unittest.mock.patch.object(telegram, "walk_channel", side_effect=walk), \
+             contextlib.redirect_stderr(log):
+            telegram.collect(day="2026-10-15", channels=["a", "b"], workers=1)
+        self.assertEqual(log.getvalue(), "")
+        report = telegram.last_report()
+        self.assertEqual(report["mode"], "fixed")
+        self.assertEqual(report["channels"]["a"]["kept"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

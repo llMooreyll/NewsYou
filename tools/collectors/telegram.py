@@ -17,6 +17,7 @@ from __future__ import annotations
 import html as html_mod
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -439,10 +440,28 @@ def pick_day(day_counts_by_channel: dict[str, dict[str, int]]) -> str | None:
     return max(days) if days else None
 
 def collect(limit: int = 400, day: str = "auto", pages: int = 4,
-            channels: list[str] | None = None, workers: int = base.DEFAULT_WORKERS, **_):
+            channels: list[str] | None = None, workers: int = base.DEFAULT_WORKERS,
+            progress=None, **_):
     channels = channels or DEFAULT_CHANNELS
     target = resolve_day(day)
     report: dict[str, dict] = {}
+    # The walk below is concurrent, so the count is guarded. Progress is
+    # reported from the worker threads rather than after parallel_map returns:
+    # the point of it is to say something while the channels are still running,
+    # and by then they are all done.
+    counter = {"seen": 0, "failed": 0}
+    gate = threading.Lock()
+
+    def announce(ok: bool) -> None:
+        if progress is None:
+            return
+        with gate:
+            counter["seen"] += 1
+            counter["failed"] += 0 if ok else 1
+            note = f"{counter['seen']}/{len(channels)} 频道"
+            if counter["failed"]:
+                note += f" · {counter['failed']} 失败"
+            progress(note)
 
     def walk(channel: str) -> tuple[str, list[dict], dict | None]:
         """Walk one channel. Returns (channel, posts, failure) and never raises.
@@ -452,15 +471,20 @@ def collect(limit: int = 400, day: str = "auto", pages: int = 4,
         which is where politeness actually matters.
         """
         try:
-            return channel, walk_channel(channel, pages, None), None
+            posts = walk_channel(channel, pages, None)
         except PreviewError as exc:
+            announce(False)
             return channel, [], {"ok": False, "error": str(exc), "fetched": 0, "kept": 0,
                                  "title": CHANNEL_TITLES.get(channel) or ""}
+        announce(True)
+        return channel, posts, None
 
     walked: dict[str, list[dict]] = {}
     for channel, posts, failure in base.parallel_map(walk, channels, workers):
         if failure:
-            print(f"  ! telegram {channel} failed: {failure['error']}", file=sys.stderr)
+            # Kept in the report rather than printed: eighteen channels failing
+            # the same way is one problem, and the caller is the only place that
+            # can say so once instead of eighteen times.
             report[channel] = failure
             continue
         # Only successful channels enter `walked`: the reporting loop below
@@ -512,16 +536,11 @@ def collect(limit: int = 400, day: str = "auto", pages: int = 4,
         report[channel] = {"ok": True, "fetched": len(posts), "kept": kept,
                            "newest_day": newest or None,
                            "title": CHANNEL_TITLES.get(channel) or ""}
-        if kept == 0:
-            print(f"  telegram {channel}: no posts on {chosen} (newest {newest or 'none'})",
-                  file=sys.stderr)
 
     _LAST_REPORT.clear()
     _LAST_REPORT.update({"day": chosen, "mode": "fixed" if target else "auto",
                          "channels": {c: report[c] for c in channels if c in report}})
     collected.sort(key=lambda x: str(x.get("published_at") or ""), reverse=True)
-    if not target and chosen:
-        print(f"  telegram: auto-selected day {chosen} for all channels", file=sys.stderr)
     return collected[:limit]
 
 def download_for_items(items: list[dict], media_root: Path, per_post: int = 2,

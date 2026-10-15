@@ -32,6 +32,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import sys
 import time
@@ -41,11 +42,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config                                              # noqa: E402
+import console                                             # noqa: E402
 from collectors import base, registry                      # noqa: E402
 from collectors import extract as ex                        # noqa: E402
 from collectors import telegram as tg                       # noqa: E402
 from collectors.base import CST, FULLTEXT_MODES            # noqa: E402
 import ai_stage                                             # noqa: E402
+
+# How many of a collector's own notices are reprinted under its line. Beyond
+# this they are only counted: a source that emits fifty remarks has a problem
+# worth one line, not fifty.
+REMARK_LIMIT = 4
 
 def _source_kwargs(name: str, args) -> dict:
     """Per-source arguments. Keeps site quirks out of the main loop."""
@@ -91,8 +98,87 @@ def _nature_maps(cfg) -> tuple[dict, dict]:
     unit_nature = {str(k): str(v) for k, v in (cfg.get("sources.units") or {}).items()}
     return source_nature, unit_nature
 
+def _accepts_progress(module) -> bool:
+    """Whether a collector takes the live-progress callback.
+
+    Only the sources that can sit silent for a minute or more implement it; the
+    rest are finished before a progress line would be worth reading.
+    """
+    try:
+        return "progress" in inspect.signature(module.collect).parameters
+    except (TypeError, ValueError):
+        return False
+
+def _collector_failures(report: dict) -> list[tuple[str, str]]:
+    """(unit, message) for every sub-unit a collector reported as failed."""
+    out: list[tuple[str, str]] = []
+    for group in ("channels", "subreddits"):
+        for unit, record in (report.get(group) or {}).items():
+            if not record.get("ok", True):
+                out.append((unit, str(record.get("error") or "failed")))
+    return out
+
+def _unit_total(report: dict) -> int:
+    """How many sub-units the collector had, so "2 failed" can say "out of"
+    what. Telegram calls them channels, reddit calls them subreddits."""
+    for group in ("channels", "subreddits"):
+        if report.get(group):
+            return len(report[group])
+    return 0
+
+def _collector_notes(report: dict) -> list[str]:
+    """What a collector's own report has to say, in the caller's words.
+
+    Collectors used to print these as they went, which put raw text on top of
+    the live progress line. The report already carries them — telegram records
+    `kept` per channel and the day it settled on — so this phrases them once,
+    next to the source they belong to.
+    """
+    notes: list[str] = []
+    for group, noun in (("channels", "频道"), ("subreddits", "板块")):
+        units = report.get(group) or {}
+        if not units:
+            continue
+        quiet = [unit for unit, record in units.items()
+                 if record.get("ok") and record.get("kept") == 0]
+        if quiet:
+            notes.append(f"{len(quiet)}/{len(units)} 个{noun}今日无内容")
+    if report.get("mode") == "auto" and report.get("day"):
+        notes.append(f"自动选定日期 {report['day']}")
+    return notes
+
+def _group_failures(entries: list[tuple[str, str]]) -> list[tuple[int, str, list[str]]]:
+    """Fold identical failure messages together, most frequent first.
+
+    Eighteen channels failing with the same TLS error is one problem, not
+    eighteen. Repeating it buries everything else the run had to say, which is
+    exactly what made a broken run unreadable.
+    """
+    grouped: dict[str, list[str]] = {}
+    for context, message in entries:
+        grouped.setdefault(message, []).append(context)
+    return sorted(((len(ctx), msg, ctx) for msg, ctx in grouped.items()),
+                  key=lambda row: -row[0])
+
+def _source_detail(status: dict, count: int, notes: list[str]) -> str:
+    """The right-hand side of a source's result line, in fixed columns."""
+    if not count:
+        fresh = "无内容"
+    elif status.get("updated_today"):
+        fresh = "今日"
+    else:
+        days = status.get("staleness_days")
+        fresh = "无日期" if days is None else f"{days} 天前"
+    line = f"{console.pad(f'{count} 条', 8, right=True)} {console.pad(fresh, 9)}"
+    bodies = status.get("fulltext_fetched") or 0
+    if bodies:
+        line += f" 全文 {bodies}"
+    if notes:
+        line = line.rstrip() + "  " + " · ".join(notes)
+    return line
+
 def _stamp_identity(name: str, items: list[dict], source_nature: dict,
-                    unit_nature: dict) -> None:
+                    unit_nature: dict, known_units: set | None = None) -> list[str]:
     """Give every item its stable id and its nature, in place.
 
     Stamped after _postprocess() rather than before: dedupe() drops duplicates,
@@ -100,20 +186,21 @@ def _stamp_identity(name: str, items: list[dict], source_nature: dict,
 
     Two items of one source can still collide. dedupe() keys on title+summary
     while the id keys on the canonical URL, so the same URL under two different
-    titles survives as two items with one id. The second gets a `-2` suffix and
-    a warning, because a shared id would make every citation ambiguous and
-    silently break the jump.
+    titles survives as two items with one id. The second gets a `-2` suffix,
+    because a shared id would make every citation ambiguous and silently break
+    the jump. Renaming is worth saying out loud, so it comes back as a note for
+    the caller to print next to the source instead of mid-run.
     """
     seen: dict[str, int] = {}
     units_seen: set = set()
+    dupes: list[str] = []
     field = registry.UNIT_FIELD.get(name, "")
     for entry in items:
         key = ai_stage.item_id(entry)
         count = seen.get(key, 0) + 1
         seen[key] = count
         if count > 1:
-            print(f"  ! {name}: duplicate id {key}; renaming to {key}-{count}",
-                  file=sys.stderr)
+            dupes.append(key)
             key = f"{key}-{count}"
         entry["id"] = key
         unit = (entry.get("extra") or {}).get(field) if field else None
@@ -121,32 +208,41 @@ def _stamp_identity(name: str, items: list[dict], source_nature: dict,
         entry["nature"] = registry.source_nature_of(
             name, unit, source_nature=source_nature, unit_nature=unit_nature)
 
+    notes: list[str] = []
+    if dupes:
+        shown = ", ".join(dupes[:3]) + ("…" if len(dupes) > 3 else "")
+        notes.append(f"{len(dupes)} 个重复 id（{shown} 已改名）")
+
     # A linux.do section name comes from the page, so a typo in sources.units is
     # invisible at configuration time. Saying so here is the only chance. A
     # derived unit (sspai's 派早报) is not a typo when it goes unmatched — the
-    # brief simply had no split that day — so it is not reported.
-    if name not in registry.DERIVED_UNITS:
+    # brief simply had no split that day — so it is not reported. Neither is a
+    # source that returned nothing, nor a unit the collector knows about and
+    # simply had no posts for: both would blame the config for a quiet day.
+    if name not in registry.DERIVED_UNITS and items:
         wanted = {k.split(":", 1)[1] for k in unit_nature if k.startswith(f"{name}:")}
-        unmatched = sorted(wanted - units_seen)
+        unmatched = sorted(wanted - units_seen - (known_units or set()))
         if unmatched:
-            print(f"  ! {name}: sources.units names no item matched: {', '.join(unmatched)}",
-                  file=sys.stderr)
+            notes.append("sources.units 未匹配: " + ", ".join(unmatched))
+    return notes
 
-def _postprocess(name: str, items: list[dict], args, outdir: Path) -> list[dict]:
+def _postprocess(name: str, items: list[dict], args, outdir: Path) -> tuple[list[dict], list[str]]:
     """Telegram-only: deterministic pre-dedupe plus image download."""
     if name != "telegram":
-        return items
+        return items, []
     items, groups = base.dedupe(items)
     outdir.mkdir(parents=True, exist_ok=True)
+    notes: list[str] = []
     if not args.no_images:
         saved = tg.download_for_items(items, base.media_root(),
                                       args.images_per_post, args.image_cap,
                                       args.workers)
-        print(f"  telegram images saved: {saved}", file=sys.stderr)
+        if saved:
+            notes.append(f"图片 {saved}")
     (outdir / "telegram_duplicate_groups.json").write_text(
         json.dumps({"generated_at": datetime.now(CST).isoformat(), "groups": groups},
                    ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return items
+    return items, notes
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -281,20 +377,33 @@ def main() -> int:
     if not args.source and not args.all:
         parser.error("choose a source, or pass --all")
 
+    report = console.reporter()
+    disabled_note = f" · 禁用 {', '.join(sorted(disabled))}" if disabled else ""
+    report.banner("采集", f"engine {args.engine}", f"workers {args.workers}",
+                  f"{len(order)} 个源{disabled_note}")
+
     today = datetime.now(CST).date()
     targets = order if args.all else [args.source]
     results: dict[str, list[dict]] = {}
     statuses: dict[str, dict] = {}
     failures: dict[str, str] = {}
+    breakdown: list[tuple[str, str]] = []
 
-    for name in targets:
-        print(f"→ {name}", file=sys.stderr)
-        started = time.time()
+    for index, name in enumerate(targets, 1):
+        step = console.Step(report, name, index, len(targets), name)
         try:
             module = registry.get(name)
             limit = args.limit if args.limit is not None \
                 else args.limits.get(name, registry.default_limit(name))
-            items = module.collect(limit, engine=args.engine, **_source_kwargs(name, args))
+            kwargs = _source_kwargs(name, args)
+            if _accepts_progress(module):
+                kwargs["progress"] = step.progress
+            # A collector's own stderr is buffered, not shown: a raw write lands
+            # on top of the live line and is erased by the next redraw.
+            with console.capture() as stray:
+                items = module.collect(limit, engine=args.engine, **kwargs)
+            remarks = console.captured_lines(stray)
+
             # The configured label wins over the collector's own display name,
             # so renaming a panel needs no code change.
             if args.labels.get(name):
@@ -303,32 +412,56 @@ def main() -> int:
             for entry in items:
                 base.stamp_now(entry)
             base.mark_today(items, today)
-            items = _postprocess(name, items, args, args.outdir)
-            _stamp_identity(name, items, args.source_nature, args.unit_nature)
+            items, notes = _postprocess(name, items, args, args.outdir)
 
             results[name] = items
             statuses[name] = base.source_status(items, today)
-            # collectors may expose a structured report (telegram: per channel),
-            # so partial failures are recorded instead of only printed
-            if hasattr(module, "last_report"):
-                statuses[name]["collector_report"] = module.last_report()
-                failed = [c for c, r in (statuses[name]["collector_report"].get("channels") or {}).items()
-                          if not r.get("ok")]
-                if failed:
-                    print(f"  partial failure: {', '.join(failed)}", file=sys.stderr)
+            # A collector may expose a structured report (telegram: per channel,
+            # reddit: per subreddit), so a partial failure is recorded rather
+            # than only mentioned in passing.
+            collector_report = module.last_report() if hasattr(module, "last_report") else {}
+            if collector_report:
+                statuses[name]["collector_report"] = collector_report
             # Facts about a source that no item can carry. sspai reports
             # whether today's 派早报 exists at all; with no brief there is no
             # item to read it from, and the page needs to say so.
             if hasattr(module, "last_state"):
                 statuses[name].update(module.last_state())
-            fresh = ("today" if statuses[name]["updated_today"]
-                     else f"{statuses[name]['staleness_days']}d ago")
-            bodies = statuses[name]["fulltext_fetched"]
-            print(f"  {len(items)} items in {time.time() - started:.1f}s  "
-                  f"(latest: {fresh}, fulltext: {bodies})", file=sys.stderr)
+
+            # Every unit the collector knows about, content or not: a
+            # sources.units name is only a typo if the collector has never heard
+            # of it.
+            known_units: set = set()
+            for group in ("channels", "subreddits"):
+                known_units |= set(collector_report.get(group) or {})
+            notes += _stamp_identity(name, items, args.source_nature, args.unit_nature,
+                                     known_units)
+            notes += _collector_notes(collector_report)
+
+            broken = _collector_failures(collector_report)
+            breakdown.extend((f"{name}/{unit}", message) for unit, message in broken)
+            if broken:
+                units = _unit_total(collector_report)
+                notes.append(f"{len(broken)}/{units} 个单元失败" if units
+                             else f"{len(broken)} 个单元失败")
+            if len(remarks) > REMARK_LIMIT:
+                notes.append(f"{len(remarks)} 条提示")
+
+            # Nothing came back and the collector said why: a failed source even
+            # though collect() itself returned cleanly.
+            state = "fail" if (not items and broken) else ("warn" if broken else "ok")
+            if state == "fail":
+                failures[name] = f"{len(broken)} 个单元失败"
+            step.done(state, _source_detail(statuses[name], len(items), notes))
+            for line in remarks[:REMARK_LIMIT]:
+                report.note("  " + report.style(line, "dim"))
+            if len(remarks) > REMARK_LIMIT:
+                report.note(report.style(f"  …还有 {len(remarks) - REMARK_LIMIT} 条提示",
+                                         "dim"))
         except Exception as exc:  # noqa: BLE001
             failures[name] = f"{type(exc).__name__}: {exc}"
-            print(f"  FAILED: {failures[name]}", file=sys.stderr)
+            breakdown.append((name, failures[name]))
+            step.done("fail", failures[name])
 
     if args.list:
         for name in targets:
@@ -372,7 +505,6 @@ def main() -> int:
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         index["sources"][name] = {"file": path.name, "count": len(results[name]), "ok": True,
                                   **statuses.get(name, {})}
-        print(f"  wrote {path}", file=sys.stderr)
 
     for name, err in failures.items():
         index["sources"][name] = {"file": None, "count": 0, "ok": False, "error": err}
@@ -380,26 +512,42 @@ def main() -> int:
     (args.outdir / "index.json").write_text(
         json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+    stage2_inputs: list[Path] = []
     if not args.no_ai_input and results:
         args.aidir.mkdir(parents=True, exist_ok=True)
         if "telegram" in results:
             tg_input = ai_stage.build_telegram_input(results["telegram"], today.isoformat())
             (args.aidir / "telegram_input.json").write_text(
                 json.dumps(tg_input, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            print(f"  wrote {args.aidir / 'telegram_input.json'} "
-                  f"({tg_input['item_count']} items)", file=sys.stderr)
-        print("  stage 2b input (digest_input.json) is written by tools/ai_apply.py "
-              "after the telegram merge", file=sys.stderr)
+            stage2_inputs.append(args.aidir / "telegram_input.json")
 
-    fresh = [n for n in targets if statuses.get(n, {}).get("updated_today")]
-    stale = [n for n in targets if n in statuses and not statuses[n].get("updated_today")]
-    bodies = sum(statuses.get(n, {}).get("fulltext_fetched", 0) for n in targets)
-    print(f"\nday {today.isoformat()} · engine {args.engine}: "
-          f"{len(fresh)} source(s) updated today, {len(stale)} stale, {bodies} full text",
-          file=sys.stderr)
-    if stale:
-        print("  stale: " + ", ".join(f"{n}({statuses[n]['staleness_days']}d)" for n in stale),
-              file=sys.stderr)
+    # ---- what the run amounted to ----
+    total = sum(len(results.get(name, [])) for name in targets)
+    bodies = sum(statuses.get(name, {}).get("fulltext_fetched", 0) for name in targets)
+    report.write()
+    report.write("  " + report.style("采集完成", "bold") + "  " +
+                 f"{total} 条 · {len(results)}/{len(targets)} 源成功 · "
+                 f"{bodies} 篇全文 · {report.elapsed()}")
+    if breakdown:
+        report.write()
+        report.write("  " + report.style("失败详情", "bold"))
+        for count, message, contexts in _group_failures(breakdown):
+            where = contexts[0] if count == 1 else f"{count} 个单元"
+            label = f"    {console.pad(where, 22)} "
+            indent = " " * console.display_width(label)
+            for line in console.wrap(message, report.width, label, indent):
+                report.write(line)
+    silent = [name for name in targets if not results.get(name) and name not in failures]
+    if silent:
+        label = "  今日无数据："
+        for line in console.wrap("，".join(silent), report.width, label,
+                                 " " * console.display_width(label)):
+            report.write(line)
+    report.write()
+    report.write("  " + report.style("输出", "dim") + "  " +
+                 " · ".join([f"{args.outdir}/（{len(results)} 个源）"] +
+                            [str(path) for path in stage2_inputs]))
+    report.close()
     print(args.outdir / "index.json")
     return 0
 

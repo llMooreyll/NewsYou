@@ -82,6 +82,9 @@ feed = "topstories"
 sort = "hot"
 
 [reddit]
+# Off by default (see `sources.disabled`): it works, but it is slow. Nothing
+# below takes effect until it is switched back on.
+#
 # Read through the public Atom feeds, which need no login. Each feed returns 25
 # posts with a title, a permalink and an author — no score and no comment count.
 # Reddit's own `hot` ordering is the ranking, so that is not a loss.
@@ -107,7 +110,10 @@ enabled = []
 # Sources to switch off by name. `weibo` is off because its hot-search list is
 # noisy and its content rarely survives a day; the collector and its board
 # renderer are both still here, so removing the name below turns it back on.
-disabled = ["weibo"]
+# `reddit` is off because it is slow, not because it is broken: the public feeds
+# allow about one request a minute, so three subreddits add two minutes of
+# waiting to every run. Same deal — delete the name to bring it back.
+disabled = ["weibo", "reddit"]
 
 # Per-source item limits.
 [sources.limits]

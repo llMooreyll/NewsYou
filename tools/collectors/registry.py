@@ -142,7 +142,12 @@ def source_nature_of(name: str, unit: str | None, *, source_nature: dict,
 # Sources switched off by default. `weibo` is here because its hot-search list
 # is noisy and rarely survives a day, but the collector and its board renderer
 # both stay in the tree: deleting the name turns the source back on.
-DEFAULT_DISABLED = ["weibo"]
+# `reddit` is here for a different reason — it works, but the public feeds allow
+# roughly one request a minute, so three subreddits cost two minutes of waiting
+# on every run. It is switched off until that is worth it, or until there is a
+# cheaper way to read it; the collector and its board stay for the same reason
+# as weibo's.
+DEFAULT_DISABLED = ["weibo", "reddit"]
 
 # Sources whose `collect` accepts a fulltext policy.
 # anywayfm is absent on purpose: /now/ is a list of recommended links and its

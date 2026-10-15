@@ -53,6 +53,7 @@ CST = timezone(timedelta(hours=8))
 
 sys.path.insert(0, str(TOOLS))
 import config  # noqa: E402
+import console  # noqa: E402
 
 def load_json(path: Path):
     try:
@@ -165,6 +166,9 @@ def main() -> int:
     if config.emit_show_config(cfg, args):
         return 0
 
+    output = console.reporter()
+    output.banner("归档", f"day {args.day}" if args.day else "")
+
     root = Path(cfg.get("archive.root"))
     collected = Path(cfg.get("paths.collected"))
     aidir = Path(cfg.get("paths.ai"))
@@ -175,8 +179,11 @@ def main() -> int:
     # snapshot that looks successful.
     missing = [str(p) for p in (collected, processed, digest_html) if not p.exists()]
     if missing:
-        print("nothing to archive; missing:\n  " + "\n  ".join(missing)
-              + "\nrun `make all` first (or use `make daily`)", file=sys.stderr)
+        output.error("没有可归档的内容，缺少：")
+        for path in missing:
+            output.note(f"  {path}")
+        output.note("先运行 make all（或 make daily）")
+        output.close()
         return 1
 
     index = load_json(collected / "index.json") or {}
@@ -206,8 +213,8 @@ def main() -> int:
 
         final = final_name(root, day, args.force)
         if final.name != day:
-            print(f"note: {root / day} exists; writing {final} instead "
-                  f"(use --force to replace)", file=sys.stderr)
+            output.warn(f"{root / day} 已存在，改写为 {final}"
+                        f"（用 --force 覆盖）")
         install_snapshot(staging, final)
         snapshot = final
     finally:
@@ -237,11 +244,13 @@ def main() -> int:
     })
 
     size = sum(f.stat().st_size for f in snapshot.rglob("*") if f.is_file())
-    print(f"\narchived {snapshot}  ({size / 1024 / 1024:.1f} MiB)", file=sys.stderr)
-    print(f"  day {meta['day']} · engine {summary.get('engine')} · "
-          f"ai {summary.get('ai_backend')} · {summary['item_count']} items · "
-          f"{summary['keywords']} keywords", file=sys.stderr)
-    print(f"  root digest kept at {digest_html}", file=sys.stderr)
+    output.note(f"{meta['day']} · engine {summary.get('engine')} · "
+                f"ai {summary.get('ai_backend')} · {summary['item_count']} 条 · "
+                f"{summary['keywords']} 关键词 · {size / 1024 / 1024:.1f} MiB")
+    # The root digest is copied, never moved, so it stays the current report and
+    # the next run may overwrite it.
+    output.note(f"根目录的 {digest_html.name} 未改动")
+    output.close()
     print(snapshot / "digest.html")
     return 0
 

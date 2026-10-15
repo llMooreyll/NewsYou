@@ -21,7 +21,7 @@ import json
 import re
 import ssl
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -101,7 +101,7 @@ def fetch_json(url: str, **kw):
 
 DEFAULT_WORKERS = 4
 
-def parallel_map(fn, items, workers: int = DEFAULT_WORKERS) -> list:
+def parallel_map(fn, items, workers: int = DEFAULT_WORKERS, progress=None) -> list:
     """Apply `fn` to each item with a bounded number of threads.
 
     These calls block on the network, and urllib releases the GIL while it
@@ -117,12 +117,29 @@ def parallel_map(fn, items, workers: int = DEFAULT_WORKERS) -> list:
     stays reproducible whatever order the requests happen to finish in. `fn` is
     expected to handle its own per-item errors; an exception here aborts the
     whole batch, which is the caller's choice to make.
+
+    `progress` is called as `progress(done, total, item)` from this thread after
+    each item finishes, which is what lets a caller show a live count. Results
+    are still ordered by input, so the callback may name items out of order.
     """
     items = list(items)
-    if workers <= 1 or len(items) <= 1:
-        return [fn(item) for item in items]
-    with ThreadPoolExecutor(max_workers=min(workers, len(items))) as pool:
-        return list(pool.map(fn, items))
+    total = len(items)
+    if workers <= 1 or total <= 1:
+        out = []
+        for done, item in enumerate(items, 1):
+            out.append(fn(item))
+            if progress:
+                progress(done, total, item)
+        return out
+    results: list = [None] * total
+    with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
+        futures = {pool.submit(fn, item): index for index, item in enumerate(items)}
+        for done, future in enumerate(as_completed(futures), 1):
+            index = futures[future]
+            results[index] = future.result()
+            if progress:
+                progress(done, total, items[index])
+    return results
 
 # --------------------------------------------------------------------------
 # Text / HTML helpers

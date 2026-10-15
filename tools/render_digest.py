@@ -44,6 +44,7 @@ ASSETS = Path(__file__).resolve().parent / "digest_assets"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ai_stage  # noqa: E402
 import config  # noqa: E402
+import console  # noqa: E402
 
 # name -> (tab label, subtitle)
 SOURCE_META = {
@@ -1562,8 +1563,11 @@ def main() -> int:
     # A source that produced data is present regardless of what the index says.
     absent = {n: v for n, v in absent.items() if n not in sources}
 
+    output = console.reporter()
     if not sources:
-        print(f"no data in {indir}; run tools/collect.py first")
+        output.banner("渲染")
+        output.error(f"{indir} 里没有数据；先运行 make collect")
+        output.close()
         return 1
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -1572,9 +1576,13 @@ def main() -> int:
     size = args.output.stat().st_size / 1024
     has_panel = bool(digest and (digest.get("summary") or digest.get("keywords"))) \
         or ai_stage.has_categories(categories)
-    print(f"{args.output}  ({size:.0f} KiB, {len(sources)} sources"
-          + (f", {len(absent)} absent" if absent else "")
-          + (", digest panel" if has_panel else "") + ")")
+    output.banner("渲染", f"{len(sources)} 个源", f"{size:.0f} KiB",
+                  f"{len(absent)} 个源无数据" if absent else "",
+                  "含汇总面板" if has_panel else "无汇总面板")
+    # The path stays on stdout on its own line: it is what a caller wants from
+    # this tool, and everything a person wants is on stderr.
+    output.close()
+    print(args.output)
     return 0
 
 
