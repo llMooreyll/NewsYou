@@ -160,6 +160,21 @@ def _day_starts(cfg) -> dict[str, int]:
         out[name] = (hour - grace) % 24 if hour else 0
     return out
 
+def _snapshot_tags(cfg) -> set[str]:
+    """Entries tagged 实时, as source names or `<source>:<unit>` keys.
+
+    One list, two granularities, mirroring how `sources.units` is keyed. A whole
+    source is tagged when its response is a ranking of what is current; a single
+    unit is tagged when only part of a source works that way — a live feed
+    channel inside an otherwise dated source, say.
+    """
+    return {str(name) for name in (cfg.get("sources.snapshot") or [])}
+
+def _snapshot_units(tags: set[str], name: str) -> set[str]:
+    """The unit names tagged 实时 for one source, from the shared tag list."""
+    prefix = f"{name}:"
+    return {tag[len(prefix):] for tag in tags if tag.startswith(prefix)}
+
 def _collector_notes(report: dict) -> list[str]:
     """What a collector's own report has to say, in the caller's words.
 
@@ -344,6 +359,7 @@ def main() -> int:
     args.channels = list(cfg.get("telegram.channels") or [])
     args.source_nature, args.unit_nature = _nature_maps(cfg)
     args.day_starts = _day_starts(cfg)
+    args.snapshots = _snapshot_tags(cfg)
     args.hn_feed = cfg.get("hackernews.feed")
     args.v2ex_sort = cfg.get("v2ex.sort")
     args.reddit_subs = list(cfg.get("reddit.subreddits") or [])
@@ -458,9 +474,19 @@ def main() -> int:
             for entry in items:
                 base.stamp_now(entry)
             # The window is per source: linux.do's day starts the previous
-            # evening, so "today" is not one date for the whole run.
-            start, now = base.day_window(args.day_starts.get(name, 0))
+            # evening, so "today" is not one date for the whole run, and a
+            # source tagged 实时 has no window at all.
+            start, now = base.day_window(args.day_starts.get(name, 0),
+                                         snapshot=name in args.snapshots)
             base.mark_today(items, start, now)
+            # A unit tagged 实时 skips the window on its own, for the case where
+            # one channel inside a dated source is a live feed.
+            live = _snapshot_units(args.snapshots, name)
+            if live and start is not None:
+                field = registry.UNIT_FIELD.get(name, "")
+                for entry in items:
+                    if field and (entry.get("extra") or {}).get(field) in live:
+                        entry["is_today"] = True
             items, notes = _postprocess(name, items, args, args.outdir)
 
             status = base.source_status(items, start, now)
@@ -533,16 +559,6 @@ def main() -> int:
         extra = len(outcome["remarks"]) - REMARK_LIMIT
         if extra > 0:
             report.note(report.style(f"  …还有 {extra} 条提示", "dim"))
-
-    for name in targets:
-        if name in collected:
-            results[name] = collected[name]["items"]
-            statuses[name] = collected[name]["status"]
-            for line in collected[name]["remarks"][:REMARK_LIMIT]:
-                report.note("  " + report.style(line, "dim"))
-            extra = len(collected[name]["remarks"]) - REMARK_LIMIT
-            if extra > 0:
-                report.note(report.style(f"  …还有 {extra} 条提示", "dim"))
 
     if args.list:
         for name in targets:

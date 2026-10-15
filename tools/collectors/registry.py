@@ -157,6 +157,30 @@ DEFAULT_DISABLED = ["weibo", "reddit"]
 # half an hour late still lands inside its own day.
 DAY_START_HOUR: dict[str, int] = {"linuxdo": 21}
 
+# Sources whose response is a *snapshot of what is current* rather than a feed of
+# dated publications. Every item in such a response is current by construction,
+# so the day window does not apply to them: an entry's own timestamp says when
+# the underlying thing was created, which is not the question being asked.
+#
+# Measured, because this is not obvious from the timestamps:
+#
+#   zhihu       the hot list is ranked by heat; the timestamp is when the
+#               *question* was created, so rank 2 and rank 6 were 20.7h and
+#               25.6h old while being the 2nd and 6th hottest topics right now.
+#   hackernews  `topstories` is the front-page ranking, and it holds stories up
+#               to 3.4 days old — 8 of the top 20 were 2–3 days old, and the
+#               order is not by score, so it is a ranking rather than a feed.
+#   v2ex        the hot tab is sorted by reply count and its timestamp is the
+#               *last reply*, which is a measure of activity, not of publication.
+#   weibo       the board carries no publication time at all; the capture time is
+#               stamped instead, so it is already always-current, and listing it
+#               here records that intent.
+#
+# Anyway.Now is deliberately absent: /now/ is a reverse-chronological list of
+# dated recommendations, so its older entries really are older, and the window
+# keeping only the newest is right.
+SNAPSHOT_SOURCES = ["zhihu", "hackernews", "v2ex", "weibo"]
+
 # Sources whose `collect` accepts a fulltext policy.
 # anywayfm is absent on purpose: /now/ is a list of recommended links and its
 # "full text" would be a third-party article reached via a 301 redirect.

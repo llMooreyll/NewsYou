@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -20,6 +21,7 @@ import ai_stage  # noqa: E402
 import config  # noqa: E402
 import render_digest  # noqa: E402
 from collectors import base, registry, sspai  # noqa: E402
+from collectors.base import CST  # noqa: E402
 
 DAY = "2026-10-13"
 
@@ -249,6 +251,151 @@ class BriefState(unittest.TestCase):
         monday = datetime(2026, 10, 12, 11, 0)
         self.assertEqual(sspai.brief_state([self.issue("2026-10-09")], monday), "suspended")
 
+    def test_a_listing_that_did_not_reach_the_brief_is_not_a_suspension(self):
+        """The bug this exists for: 派早报 publishes at 08:31 and the site keeps
+        publishing after it, so a window sized for articles can stop above the
+        brief. Reporting 今日停稿 then states, as a fact about the publisher,
+        something that is really a fact about our request — measured on
+        2026-10-15, where a 20-item window missed it and the page said the
+        brief had stopped."""
+        monday = datetime(2026, 10, 12, 11, 0)
+        self.assertEqual(
+            sspai.brief_state([self.issue("2026-10-09")], monday, covered=False), "missing")
+
+    def test_covering_the_window_still_reports_a_real_suspension(self):
+        monday = datetime(2026, 10, 12, 11, 0)
+        self.assertEqual(
+            sspai.brief_state([self.issue("2026-10-09")], monday, covered=True), "suspended")
+
+    def test_a_found_brief_wins_over_coverage(self):
+        """Coverage only decides what an absence means; a brief in hand is
+        published whatever the window did."""
+        monday = datetime(2026, 10, 12, 11, 0)
+        self.assertEqual(
+            sspai.brief_state([self.issue("2026-10-12")], monday, covered=False), "published")
+
+
+class BriefListing(unittest.TestCase):
+    """The listing has to guarantee the brief a place, not compete for one."""
+
+    def _article(self, ident, day, hour, post_type=1):
+        return {"id": ident, "title": f"文{ident}", "post_type": post_type,
+                "released_at": int(datetime.fromisoformat(
+                    f"{day}T{hour:02d}:00:00+08:00").timestamp()),
+                "summary": "", "author": {"nickname": "a"}, "tags": [],
+                "custom_tags": [], "keywords": [], "views_count": 0}
+
+    def _listing(self, articles):
+        return {"list": articles, "total": 999}
+
+    def test_a_brief_below_the_window_is_still_found(self):
+        """22 articles published after the brief pushed it to position 23 on
+        2026-10-15, outside the 20-item window. The wide window reaches back
+        days, so it also settles that the brief really is absent from the small
+        one rather than merely out of its reach."""
+        articles = [self._article(200 + i, "2026-10-15", 10) for i in range(22)]
+        articles.append(self._article(116193, "2026-10-15", 8, post_type=3))
+        articles.append(self._article(100, "2026-10-11", 9))    # 4 天前，撑开回溯
+        calls = []
+
+        def fetch(url, **kw):
+            calls.append(url)
+            limit = int(url.split("limit=")[1].split("&")[0])
+            return self._listing(articles[:limit])
+
+        now = datetime(2026, 10, 15, 16, 0, tzinfo=CST)
+        with unittest.mock.patch.object(sspai.base, "fetch_json", side_effect=fetch):
+            items, covered = sspai._from_api(20, now=now)
+        self.assertEqual(len([e for e in items if sspai._is_brief(e)]), 1)
+        self.assertEqual(len(items), 20)
+        self.assertTrue(covered)
+        # the first request is the small one; only the miss widens it
+        self.assertEqual(len(calls), 2)
+        self.assertIn("limit=20", calls[0])
+        self.assertIn(f"limit={sspai.API_WIDE_WINDOW}", calls[1])
+
+    def test_one_request_when_the_brief_is_already_there(self):
+        articles = [self._article(1, "2026-10-15", 10)]
+        articles.append(self._article(116193, "2026-10-15", 8, post_type=3))
+        calls = []
+
+        def fetch(url, **kw):
+            calls.append(url)
+            return self._listing(articles)
+
+        now = datetime(2026, 10, 15, 16, 0, tzinfo=CST)
+        with unittest.mock.patch.object(sspai.base, "fetch_json", side_effect=fetch):
+            items, _ = sspai._from_api(20, now=now)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len([e for e in items if sspai._is_brief(e)]), 1)
+
+    def test_no_widening_before_the_brief_is_due(self):
+        articles = [self._article(1, "2026-10-15", 3)]
+        calls = []
+
+        def fetch(url, **kw):
+            calls.append(url)
+            return self._listing(articles)
+
+        early = datetime(2026, 10, 15, 7, 0, tzinfo=CST)
+        with unittest.mock.patch.object(sspai.base, "fetch_json", side_effect=fetch):
+            _, covered = sspai._from_api(20, now=early)
+        self.assertEqual(len(calls), 1)
+        # The window does reach back past the brief hour here; what matters is
+        # that nothing was widened, and that the state is still "pending"
+        # rather than an absence.
+        self.assertEqual(sspai.brief_state([], early, covered=covered), "pending")
+
+    def test_no_widening_on_a_weekend(self):
+        """There is no brief on a Saturday, so looking harder would only add a
+        request to every weekend run."""
+        articles = [self._article(1, "2026-10-17", 3)]
+        calls = []
+
+        def fetch(url, **kw):
+            calls.append(url)
+            return self._listing(articles)
+
+        saturday = datetime(2026, 10, 17, 16, 0, tzinfo=CST)
+        with unittest.mock.patch.object(sspai.base, "fetch_json", side_effect=fetch):
+            sspai._from_api(20, now=saturday)
+        self.assertEqual(len(calls), 1)
+
+    def test_a_full_window_is_reported_as_truncated(self):
+        """A full window means more items exist beyond it, so its oldest entry
+        is a cut-off rather than the end of the list."""
+        articles = [self._article(1, "2026-10-15", 10), self._article(2, "2026-10-15", 9)]
+        with unittest.mock.patch.object(sspai.base, "fetch_json",
+                                        return_value=self._listing(articles)):
+            _, full = sspai._api_window(2)
+        self.assertTrue(full)
+        with unittest.mock.patch.object(sspai.base, "fetch_json",
+                                        return_value=self._listing(articles[:1])):
+            _, full = sspai._api_window(2)
+        self.assertFalse(full)
+
+    def test_a_window_stopping_above_the_brief_hour_is_not_covered(self):
+        items = [{"published_at": "2026-10-15T09:55:00+08:00"}]
+        now = datetime(2026, 10, 15, 16, 0, tzinfo=CST)
+        self.assertFalse(sspai._reaches_brief_window(items, now))
+
+    def test_a_window_reaching_the_previous_day_is_covered(self):
+        items = [{"published_at": "2026-10-14T20:00:00+08:00"}]
+        now = datetime(2026, 10, 15, 16, 0, tzinfo=CST)
+        self.assertTrue(sspai._reaches_brief_window(items, now))
+
+    def test_an_empty_window_is_not_covered(self):
+        self.assertFalse(sspai._reaches_brief_window(
+            [], datetime(2026, 10, 15, 16, 0, tzinfo=CST)))
+
+    def test_the_rss_fallback_reports_no_coverage(self):
+        """A feed carries no way to tell a missing brief from an unlooked-for
+        one, so it must not claim the brief stopped."""
+        with unittest.mock.patch.object(sspai.feedmod, "feed_items", return_value=[]):
+            items, covered = sspai._from_feed(20, "modern")
+        self.assertEqual(items, [])
+        self.assertFalse(covered)
+
 # --------------------------------------------------------------------------
 # rendering
 # --------------------------------------------------------------------------
@@ -296,6 +443,15 @@ class SspaiPanel(unittest.TestCase):
         html = render_digest.render_sspai_panel(self.others, {"brief_state": "unknown"})
         self.assertNotIn("停稿", html)
         self.assertNotIn("尚未发布", html)
+
+    def test_a_listing_that_missed_the_brief_says_so_without_blaming_the_site(self):
+        """`missing` is not `suspended`: the API answered and did not reach back
+        far enough, which is a fact about the request. Saying 今日停稿 there
+        would report our own gap as the publisher's decision."""
+        html = render_digest.render_sspai_panel(self.others, {"brief_state": "missing"})
+        self.assertIn("未能确认", html)
+        self.assertNotIn("停稿", html)
+        self.assertNotIn("周末", html)
 
     def test_the_roundup_is_one_block(self):
         """简讯 is drawn as a single block even though each notice is its own

@@ -1330,12 +1330,20 @@ def render_sspai_panel(items: list[dict], status: dict | None = None) -> str:
                     f'<h2 class="sec-h">派早报<span class="n">{len(stories)}</span></h2>'
                     f'{"".join(rendered)}</section>')
         links.append(("sp-brief", "派早报", len(stories), children))
-    elif state in ("suspended", "pending"):
-        # No brief today. Saying which of the two it is matters: on a weekend
-        # there is none by design, on a weekday morning it simply is not out.
-        note = ("周末与法定假期不更新，下一期在下一个工作日 06:00–09:00 发布。"
-                if state == "suspended" else "今日尚未发布，通常在 06:00–09:00 之间。")
-        label = "今日停稿" if state == "suspended" else "尚未发布"
+    elif state in ("suspended", "pending", "missing"):
+        # No brief today. Which of these it is matters: on a weekend there is
+        # none by design, on a weekday morning it simply is not out yet, and
+        # "missing" means the listing never reached back to where the brief
+        # would have been — which is a fact about the request, not about the
+        # publisher, and must not be reported as 停稿.
+        notes = {
+            "suspended": ("周末与法定假期不更新，下一期在下一个工作日 06:00–09:00 发布。",
+                          "今日停稿"),
+            "pending": ("今日尚未发布，通常在 06:00–09:00 之间。", "尚未发布"),
+            "missing": ("本次抓取未回溯到派早报的发布时间，无法确认今天是否发布。",
+                        "未能确认"),
+        }
+        note, label = notes[state]
         secs.append(f'<section class="sec" id="sp-brief">'
                     f'<h2 class="sec-h">派早报<span class="aside">{label}</span></h2>'
                     f'<p class="empty">{note}</p></section>')

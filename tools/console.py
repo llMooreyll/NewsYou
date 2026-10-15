@@ -367,6 +367,10 @@ class _StderrRouter:
     def pop(self) -> None:
         self._local.stream = None
 
+    def current(self):
+        """This thread's buffer, or None when it is not capturing."""
+        return getattr(self._local, "stream", None)
+
     def _target(self):
         return getattr(self._local, "stream", None) or self._real
 
@@ -400,6 +404,43 @@ def _stderr_router() -> _StderrRouter:
     return _router
 
 
+class _InheritedCapture:
+    """Carries the submitting thread's capture into a worker thread.
+
+    A worker thread starts with no capture of its own, so a collector that
+    prints from inside `parallel_map` — a body that would not parse, an image
+    that would not download — would write straight over the live progress
+    region, which is the very thing the capture exists to prevent. The value is
+    read when this object is created, in the submitting thread, and applied in
+    each worker.
+
+    One instance is shared by every worker of a batch. That is safe because
+    push and pop act on the calling thread's own slot.
+    """
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+
+    def __enter__(self) -> "_InheritedCapture":
+        if self._stream is not None:
+            _stderr_router().push(self._stream)
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        if self._stream is not None:
+            _stderr_router().pop()
+        return False
+
+
+def inherited():
+    """A context manager giving a worker thread the current thread's capture.
+
+    A no-op when nothing is being captured, so it costs a collector nothing to
+    use it unconditionally.
+    """
+    return _InheritedCapture(_router.current() if _router else None)
+
+
 def captured_lines(buffer) -> list[str]:
     """The messages from a `capture()` block, with their leading markers gone."""
     out = []
@@ -409,3 +450,20 @@ def captured_lines(buffer) -> list[str]:
             continue
         out.append(text[2:] if text.startswith(("! ", "· ")) else text)
     return out
+
+
+def _install_thread_context() -> None:
+    """Let base.parallel_map carry a capture into its worker threads.
+
+    Installed here rather than imported there: `base` is a collector helper and
+    has no business knowing what a capture is. It exposes a hook that defaults
+    to a no-op, and this replaces it.
+    """
+    try:
+        from collectors import base
+    except ImportError:                      # used outside the tools/ tree
+        return
+    base.inherit_context = inherited
+
+
+_install_thread_context()

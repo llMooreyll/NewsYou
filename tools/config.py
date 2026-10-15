@@ -145,6 +145,11 @@ def defaults() -> dict:
             # 21 and actually publishes at 22:00, and this is why: an edition
             # that slips half an hour late must not fall out of its own day.
             "day_start_grace_hours": 1,
+            # Entries tagged 实时: sources (or `<source>:<unit>`) whose response
+            # is a ranking of what is current rather than a feed of dated
+            # publications. Every item in such a response is current by
+            # construction, so the day window does not apply to it.
+            "snapshot": list(registry.SNAPSHOT_SOURCES),
         },
         "feeds": [],                        # generic RSS/Atom, free-form list
         "output": {
@@ -345,6 +350,18 @@ def _validate_effective(flat: dict) -> None:
                 if name not in known:
                     raise ConfigError(f"{key}: unknown source {name!r}; "
                                       f"known: {', '.join(sorted(known))}")
+        elif key == "sources.snapshot":
+            # Either a source name or "<source>:<unit>", so the tag can be put on
+            # a whole source or on one channel inside one.
+            for name in value or []:
+                source = str(name).partition(":")[0]
+                if source not in known:
+                    raise ConfigError(f"{key}: unknown source {source!r}; "
+                                      f"known: {', '.join(sorted(known))}")
+                if source == "telegram" and ":" in str(name):
+                    unit = str(name).split(":", 1)[1]
+                    if unit not in channels:
+                        raise ConfigError(f"{key}: {unit!r} is not in telegram.channels")
         elif key.startswith("sources.day_start_hour."):
             source = key[len("sources.day_start_hour."):]
             if source not in known:

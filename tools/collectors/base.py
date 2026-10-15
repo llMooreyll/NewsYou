@@ -101,6 +101,21 @@ def fetch_json(url: str, **kw):
 
 DEFAULT_WORKERS = 4
 
+def _no_context():
+    """Default for `inherit_context`: nothing to carry.
+
+    Worker threads do not inherit the caller's stderr capture, so a collector
+    that prints from inside `parallel_map` would write straight over the live
+    progress region — the very thing the capture exists to prevent. console.py
+    installs a real implementation here; the no-op default keeps this module
+    usable on its own.
+    """
+    import contextlib
+    return contextlib.nullcontext()
+
+
+inherit_context = _no_context
+
 def parallel_map(fn, items, workers: int = DEFAULT_WORKERS, progress=None) -> list:
     """Apply `fn` to each item with a bounded number of threads.
 
@@ -124,16 +139,24 @@ def parallel_map(fn, items, workers: int = DEFAULT_WORKERS, progress=None) -> li
     """
     items = list(items)
     total = len(items)
+    # Built here, in the submitting thread, so it holds that thread's capture
+    # rather than each worker's empty one.
+    context = inherit_context()
+
+    def run(item):
+        with context:
+            return fn(item)
+
     if workers <= 1 or total <= 1:
         out = []
         for done, item in enumerate(items, 1):
-            out.append(fn(item))
+            out.append(run(item))
             if progress:
                 progress(done, total, item)
         return out
     results: list = [None] * total
     with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
-        futures = {pool.submit(fn, item): index for index, item in enumerate(items)}
+        futures = {pool.submit(run, item): index for index, item in enumerate(items)}
         for done, future in enumerate(as_completed(futures), 1):
             index = futures[future]
             results[index] = future.result()
@@ -347,14 +370,30 @@ def mark_today(items: list[dict], start, now=None) -> None:
     `day_window`. An item stamped in the future is outside the window: a source
     that dates things ahead of the clock is a source with a clock problem, and
     counting it as today would hide that.
+
+    `start=None` means the window has no lower bound, which is what a snapshot
+    source gets: everything in a current ranking is current, including an item
+    with no usable timestamp at all.
     """
     now = now or datetime.now(CST)
     for entry in items:
+        if start is None:
+            entry["is_today"] = True
+            continue
         published = to_cst(entry.get("published_at"))
         entry["is_today"] = bool(published and start <= published <= now)
 
-def day_window(hour: int = 0, now: datetime | None = None) -> tuple[datetime, datetime]:
+# "The caller supplied no window." Distinct from `start=None`, which is a real
+# window with no lower bound — what a snapshot source has.
+WINDOW_UNSET = object()
+
+def day_window(hour: int = 0, now: datetime | None = None,
+               snapshot: bool = False) -> tuple[datetime | None, datetime]:
     """The (start, now) window that counts as "today" for a source.
+
+    `snapshot` sources get no lower bound at all: their response is the current
+    state of a ranking, so every item in it is part of today whatever its own
+    timestamp says. See registry.SNAPSHOT_SOURCES for which and why.
 
     A single natural day does not fit every source. linux.do publishes its 晚报
     as one batch at 22:00, so the previous evening's edition is the one that
@@ -368,17 +407,19 @@ def day_window(hour: int = 0, now: datetime | None = None) -> tuple[datetime, da
     problem, and counting it as today would hide that.
     """
     now = now or datetime.now(CST)
+    if snapshot:
+        return None, now
     start = now.replace(hour=hour, minute=0, second=0, microsecond=0)
     if start > now:
         start -= timedelta(days=1)
     return start, now
 
 
-def fulltext_targets(items: list[dict], mode=FULLTEXT_DEFAULT, start=None,
+def fulltext_targets(items: list[dict], mode=FULLTEXT_DEFAULT, start=WINDOW_UNSET,
                      now: datetime | None = None) -> list[dict]:
     """Return the items that should receive full text under the given policy."""
     now = now or datetime.now(CST)
-    if start is None:
+    if start is WINDOW_UNSET:
         start, now = day_window(0, now)
     mark_today(items, start, now)
 
@@ -404,10 +445,11 @@ def fulltext_scope_label(entry: dict) -> str:
     """Human label describing why this item received full text."""
     return "today" if entry.get("is_today") else "requested"
 
-def source_status(items: list[dict], start=None, now: datetime | None = None) -> dict:
+def source_status(items: list[dict], start=WINDOW_UNSET,
+                  now: datetime | None = None) -> dict:
     """Freshness summary for one source, rendered as a badge in the digest."""
     now = now or datetime.now(CST)
-    if start is None:
+    if start is WINDOW_UNSET:
         start, now = day_window(0, now)
     mark_today(items, start, now)
     dated = [to_cst(e.get("published_at")) for e in items]

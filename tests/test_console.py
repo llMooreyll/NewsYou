@@ -603,3 +603,79 @@ class CategoryCeiling(unittest.TestCase):
         kept, problems = ai_stage.finalize_categories(categories, items, "news")
         self.assertEqual(len([c for c in kept if c["name"] != ai_stage.CATEGORY_FALLBACK]), 8)
         self.assertTrue(any("trimmed" in p for p in problems))
+
+
+class LiveTag(unittest.TestCase):
+    """Entries tagged 实时 skip the day window entirely.
+
+    Measured before this existed: Zhihu's hot list is ranked by heat and its
+    timestamps are *question creation* times — rank 2 and rank 6 were 20.7h and
+    25.6h old while being the 2nd and 6th hottest topics. Hacker News
+    `topstories` held 8 stories aged 2–3 days in its top 20, in an order that is
+    not by score. Both are rankings of what is current, so every item in them is
+    current whatever its own timestamp says.
+    """
+
+    def test_a_live_source_has_no_window_at_all(self):
+        now = datetime(2026, 10, 15, 15, 0, tzinfo=CST)
+        start, end = base.day_window(0, now, snapshot=True)
+        self.assertIsNone(start)
+        self.assertEqual(end, now)
+
+    def test_an_undated_item_is_today_for_a_live_source(self):
+        """A ranking's items are current even with no usable timestamp — which
+        is the whole point for a board like 微博热搜 that carries none."""
+        items = [{"published_at": None}, {"published_at": "2026-10-12T09:00:00+08:00"}]
+        base.mark_today(items, *base.day_window(0, datetime(2026, 10, 15, tzinfo=CST),
+                                                snapshot=True))
+        self.assertEqual([e["is_today"] for e in items], [True, True])
+
+    def test_a_live_source_is_not_filtered_by_the_summary(self):
+        items = [{"source": "hackernews", "id": "h:1", "nature": "discussion",
+                  "is_today": True, "title": "t", "url": "https://x/1"}]
+        self.assertEqual(
+            ai_stage.build_digest_input({"hackernews": items}, {}, "2026-10-15")
+            ["sources"]["hackernews"]["count"], 1)
+
+    def test_a_dated_source_still_gets_a_window(self):
+        now = datetime(2026, 10, 15, 15, 0, tzinfo=CST)
+        start, _ = base.day_window(0, now, snapshot=False)
+        self.assertEqual(start, datetime(2026, 10, 15, 0, 0, tzinfo=CST))
+
+    def test_the_tag_is_a_config_list_so_it_can_be_extended(self):
+        cfg = _cfg()
+        tagged = cfg.get("sources.snapshot")
+        for name in ("zhihu", "hackernews", "v2ex", "weibo"):
+            self.assertIn(name, tagged)
+        # Anyway.Now is a dated reverse-chronological list, not a ranking.
+        self.assertNotIn("anywayfm", tagged)
+        self.assertNotIn("linuxdo", tagged)
+
+    def test_a_unit_tag_is_recognised(self):
+        tags = collect._snapshot_tags(_cfg()) | {"telegram:zaihuapd"}
+        self.assertEqual(collect._snapshot_units(tags, "telegram"), {"zaihuapd"})
+        self.assertEqual(collect._snapshot_units(tags, "v2ex"), set())
+
+    def test_an_unknown_unit_tag_is_rejected(self):
+        source = (ROOT / "config" / "config.toml").read_text(encoding="utf-8")
+        broken = source.replace(
+            'snapshot = ["zhihu", "hackernews", "v2ex", "weibo"]',
+            'snapshot = ["telegram:nope"]')
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False,
+                                         encoding="utf-8") as handle:
+            handle.write(broken)
+            path = handle.name
+        with self.assertRaises(config.ConfigError) as caught:
+            config.load(path)
+        self.assertIn("not in telegram.channels", str(caught.exception))
+
+    def test_an_unknown_source_tag_is_rejected(self):
+        source = (ROOT / "config" / "config.toml").read_text(encoding="utf-8")
+        broken = source.replace(
+            'snapshot = ["zhihu", "hackernews", "v2ex", "weibo"]', 'snapshot = ["nope"]')
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False,
+                                         encoding="utf-8") as handle:
+            handle.write(broken)
+            path = handle.name
+        with self.assertRaises(config.ConfigError):
+            config.load(path)

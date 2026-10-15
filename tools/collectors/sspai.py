@@ -46,6 +46,22 @@ DIGEST_SECTION = re.compile(r"^(不妨一看|看看就行)的")
 # 派早报 publishes on weekdays only; verified across 21 issues (Sat 0, Sun 0).
 # Used to tell "the brief is not out yet" apart from "there is no brief today".
 BRIEF_LATEST_HOUR = 9
+# The earliest hour a brief has been observed at, across the sampled issues. It
+# bounds the publication window from below, which is what decides whether a
+# listing reached back far enough to have seen today's brief at all.
+BRIEF_EARLIEST_HOUR = 6
+
+# The listing window. 派早报 is published between 06:00 and 09:00, and the site
+# keeps publishing afterwards, so the brief sits *below* the day's articles and
+# a window sized for articles can miss it entirely: measured on 2026-10-15, 22
+# articles released after 08:31 pushed the brief to position 23, outside a
+# 20-item window, and the source silently lost all five of its stories.
+#
+# The fix is not to make every run pay for a window big enough for the worst day
+# — a 100-item listing is 638 KiB and 4.7s — but to widen once when a brief is
+# due and missing. The common case stays one small request.
+API_MIN_WINDOW = 20
+API_WIDE_WINDOW = 120
 
 def _article_id(url: str) -> int | None:
     try:
@@ -57,16 +73,28 @@ def _article_id(url: str) -> int | None:
 # Listing
 # --------------------------------------------------------------------------
 
-def _from_api(limit: int) -> list[dict]:
-    """The articles API, one request for the whole list.
+def _is_brief(entry: dict) -> bool:
+    return (entry.get("extra") or {}).get("post_type") == POST_TYPE_BRIEF
 
-    Everything the pipeline needs about a post comes from here, which is what
-    lets the per-article `info` endpoint go away: measured against it, this list
-    has every `author` and a superset of `tags` (its `custom_tags` included).
+def _brief_due(now: datetime) -> bool:
+    """Whether a brief should already exist by now.
+
+    Only then is it worth a second request to look for one: before the hour it
+    publishes, and on the days it does not publish at all, a missing brief is
+    the expected state rather than a sign that the listing missed it.
     """
-    data = base.fetch_json(API_URL.format(limit=max(limit, 20)))
+    return now.weekday() < 5 and now.hour >= BRIEF_LATEST_HOUR
+
+def _api_window(size: int) -> tuple[list[dict], bool]:
+    """One request for `size` articles. Returns (items, window_was_full).
+
+    A full window means more items exist beyond it, so its oldest entry is a
+    cut-off rather than the end of the list.
+    """
+    data = base.fetch_json(API_URL.format(limit=size))
+    raw = data.get("list") or []
     items: list[dict] = []
-    for article in data.get("list", []):
+    for article in raw:
         title = (article.get("title") or "").strip()
         if not title:
             continue
@@ -83,7 +111,53 @@ def _from_api(limit: int) -> list[dict]:
                    "keywords": article.get("keywords") or []},
         ))
     items.sort(key=lambda x: str(x.get("published_at") or ""), reverse=True)
-    return items[:limit]
+    return items, len(raw) >= size
+
+def _reaches_brief_window(items: list[dict], now: datetime) -> bool:
+    """Whether a listing reached back past the brief's publication window.
+
+    This is what makes "no brief found" mean "no brief published" rather than
+    "not looked at". The window is a count, so on a day busy enough it can stop
+    before the brief was ever published — and claiming 今日停稿 then would be a
+    claim the data does not support. The oldest entry has to predate the start
+    of the window the brief appears in, not just its end: a brief released at
+    08:31 is below everything released after it, so reaching back only to 09:00
+    proves nothing.
+    """
+    stamps = [base.to_cst(e.get("published_at")) for e in items]
+    stamps = [stamp for stamp in stamps if stamp]
+    if not stamps:
+        return False
+    start = now.replace(hour=BRIEF_EARLIEST_HOUR, minute=0, second=0, microsecond=0)
+    return min(stamps) <= start
+
+def _from_api(limit: int, *, now: datetime | None = None) -> tuple[list[dict], bool]:
+    """The articles API, at most two requests.
+
+    Everything the pipeline needs about a post comes from here, which is what
+    lets the per-article `info` endpoint go away: measured against it, this list
+    has every `author` and a superset of `tags` (its `custom_tags` included).
+
+    The first request is the normal window. If a brief is due and absent from
+    it, a second, wider one is made — the brief sits below the day's articles,
+    so a window that is right for articles can be wrong for it (see
+    API_WIDE_WINDOW). The newest brief is then guaranteed a place in the result
+    rather than competing with articles for the last slot.
+
+    Returns (items, covered), where `covered` says whether the listing reached
+    back far enough to have seen today's brief.
+    """
+    now = now or datetime.now(base.CST)
+    items, _full = _api_window(max(limit, API_MIN_WINDOW))
+    if not any(_is_brief(e) for e in items) and _brief_due(now):
+        items, _full = _api_window(API_WIDE_WINDOW)
+
+    briefs = [e for e in items if _is_brief(e)]
+    newest = briefs[:1]                      # already newest-first
+    others = [e for e in items if e not in newest][:max(0, limit - len(newest))]
+    out = newest + others
+    out.sort(key=lambda x: str(x.get("published_at") or ""), reverse=True)
+    return out, _reaches_brief_window(items, now)
 
 def _tags(article: dict) -> list[str]:
     """The article's tags: its `tags` plus `custom_tags`, in that order.
@@ -95,9 +169,13 @@ def _tags(article: dict) -> list[str]:
     out += [t for t in (article.get("custom_tags") or []) if isinstance(t, str) and t]
     return list(dict.fromkeys(out))
 
-def _from_feed(limit: int, engine: str) -> list[dict]:
-    """RSS fallback. No `post_type`, so 派早报 cannot be split from here."""
-    return feedmod.feed_items(FEED_URL, SOURCE, NAME, engine=engine, limit=limit)
+def _from_feed(limit: int, engine: str) -> tuple[list[dict], bool]:
+    """RSS fallback. No `post_type`, so 派早报 cannot be split from here.
+
+    `covered` is False because a feed carries no way to tell a missing brief from
+    an unlooked-for one, so the state is reported as unknown rather than guessed.
+    """
+    return feedmod.feed_items(FEED_URL, SOURCE, NAME, engine=engine, limit=limit), False
 
 # --------------------------------------------------------------------------
 # Splitting 派早报
@@ -235,12 +313,19 @@ def _split_issue(entry: dict, body: dict, engine: str, scope: str) -> list[dict]
 # Brief state
 # --------------------------------------------------------------------------
 
-def brief_state(issues: list[dict], today: datetime | None = None) -> str:
+def brief_state(issues: list[dict], today: datetime | None = None,
+                covered: bool = True) -> str:
     """Whether today's 派早报 exists, is not out yet, or is not due at all.
 
     Telling these apart matters for the page: "今日停稿" on a Saturday is right,
     but saying it at 07:00 on a Monday when the brief simply has not been
     published yet would be wrong.
+
+    `covered` is the fourth answer, and the one this function used to get wrong.
+    A brief can be missing from the listing because the listing did not reach
+    back far enough to include it — 派早报 publishes before the day's articles
+    and therefore sits below them. Reporting 今日停稿 for that would state, as a
+    fact about the publisher, something that is really a fact about our request.
     """
     now = today or datetime.now(base.CST)
     if now.weekday() >= 5:
@@ -251,6 +336,11 @@ def brief_state(issues: list[dict], today: datetime | None = None) -> str:
             return "published"
     if now.hour < BRIEF_LATEST_HOUR:
         return "pending"
+    if not covered:
+        # Distinct from the "unknown" the RSS fallback produces: here the API
+        # answered and simply did not go back far enough, so the page can say
+        # that instead of saying nothing.
+        return "missing"
     return "suspended"
 
 # --------------------------------------------------------------------------
@@ -260,11 +350,11 @@ def brief_state(issues: list[dict], today: datetime | None = None) -> str:
 def collect(limit: int = 20, fulltext=base.FULLTEXT_DEFAULT, engine: str = "legacy",
             workers: int = base.DEFAULT_WORKERS, start=None, **_):
     try:
-        items = _from_api(limit)
+        items, covered = _from_api(limit)
     except (FetchError, json.JSONDecodeError, ValueError) as exc:
         print(f"  ! sspai api failed, falling back to RSS "
               f"(派早报 will not be split): {exc}", file=sys.stderr)
-        items = _from_feed(limit, engine)
+        items, covered = _from_feed(limit, engine)
 
     # 派早报: keep the newest issue only. A day's brief is what the digest is
     # for; older ones in the window would be re-split and re-classified daily.
@@ -275,8 +365,9 @@ def collect(limit: int = 20, fulltext=base.FULLTEXT_DEFAULT, engine: str = "lega
     items = rest + latest
     items.sort(key=lambda x: str(x.get("published_at") or ""), reverse=True)
 
-    state = brief_state(issues) if any(e.get("extra", {}).get("post_type") is not None
-                                       for e in rest + latest) else "unknown"
+    state = brief_state(issues, covered=covered) \
+        if any(e.get("extra", {}).get("post_type") is not None
+               for e in rest + latest) else "unknown"
 
     # Full text: 派早报 always (splitting depends on its sections), others by
     # policy. `latest` would otherwise pick a 派评 item with no body support.

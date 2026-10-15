@@ -120,6 +120,24 @@ disabled = ["weibo", "reddit"]
 # an hour late must not fall out of its own day.
 day_start_grace_hours = 1
 
+# Sources whose response is a *ranking of what is current*, not a feed of dated
+# publications. Every item in such a response is current by construction, so the
+# day window does not apply to them: their timestamps say when the underlying
+# thing was created, which is not the question being asked.
+#
+#   zhihu       热榜按热度排序，时间戳是「提问时间」——实测第 2、6 名分别是
+#               20.7 和 25.6 小时前提出的，但它们就是此刻第 2、第 6 热的话题。
+#   hackernews  `topstories` 是首页排名，最老的能到 3.4 天前（前 20 条里有 8 条
+#               是 2–3 天前的），而且顺序不按分数——它是排名，不是时间流。
+#   v2ex        热帖榜按回复数排序，时间戳是「最后回复」，衡量的是活跃度而非发布。
+#   weibo       榜单本身没有发布时间，用抓取时刻代替，因此本来就总是「当日」。
+#
+# Anyway.Now 不在此列：/now/ 是按时间倒序的推荐列表，旧条目确实旧，窗口只留最新
+# 的那几条是对的。
+# 一个列表，两种粒度：写源名给整个源打标，写 `<源>:<单元>` 只给一个频道/分节
+# 打标（键的写法与 `sources.units` 一致）。被打了标的内容不走「当日」判断。
+snapshot = ["zhihu", "hackernews", "v2ex", "weibo"]
+
 # Per-source item limits.
 [sources.limits]
 sspai = 20
