@@ -59,7 +59,11 @@
   --rail-w:196px;
   --head-h:96px;           /* replaced at runtime with the real header height */
 }
-.no-cjk-serif{--serif:var(--sans)}
+/* No CJK serif installed: the whole page falls back to sans, and the outlined
+   figures go with it. They are digits, so `--serif-fig` does not need a CJK
+   face — but a category's index sits on the same line as its Chinese name, and
+   that is exactly the Latin-serif-next-to-CJK-sans pairing this avoids. */
+.no-cjk-serif{--serif:var(--sans);--serif-fig:var(--sans)}
 
 /* ---------- dark (default) ---------- */
 :root,[data-theme="dark"]{
