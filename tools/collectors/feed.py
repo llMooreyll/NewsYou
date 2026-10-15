@@ -36,7 +36,7 @@ def feed_items(feed_url: str, source: str, source_name: str, *, engine: str,
             break
     return items
 
-def fetch_bodies(items: list[dict], *, engine: str, fulltext, start=None,
+def fetch_bodies(items: list[dict], *, engine: str, fulltext, start=base.WINDOW_UNSET,
                  legacy_marker: str | None = None, sleep: float = 0.4,
                  include_images: bool = False,
                  workers: int = base.DEFAULT_WORKERS) -> None:

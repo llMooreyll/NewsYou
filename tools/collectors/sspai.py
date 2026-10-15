@@ -348,7 +348,7 @@ def brief_state(issues: list[dict], today: datetime | None = None,
 # --------------------------------------------------------------------------
 
 def collect(limit: int = 20, fulltext=base.FULLTEXT_DEFAULT, engine: str = "legacy",
-            workers: int = base.DEFAULT_WORKERS, start=None, **_):
+            workers: int = base.DEFAULT_WORKERS, start=base.WINDOW_UNSET, **_):
     try:
         items, covered = _from_api(limit)
     except (FetchError, json.JSONDecodeError, ValueError) as exc:

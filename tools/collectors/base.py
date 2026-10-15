@@ -385,6 +385,15 @@ def mark_today(items: list[dict], start, now=None) -> None:
 
 # "The caller supplied no window." Distinct from `start=None`, which is a real
 # window with no lower bound — what a snapshot source has.
+#
+# Every collector that accepts a `start` must default it to this sentinel, not
+# to None. A collector is never handed a window by the orchestrator, so None
+# there does not mean "no lower bound" — it means "nobody set this", and a
+# collector defaulting to None silently turns the day window off: `mark_today`
+# reads a lower bound of None as "every item is current", `is_today` is true for
+# all of them, and the `today` full-text policy fetches every body instead of
+# today's. That is what happened when this sentinel was added to the two
+# functions below but not to the seven collector signatures that feed them.
 WINDOW_UNSET = object()
 
 def day_window(hour: int = 0, now: datetime | None = None,

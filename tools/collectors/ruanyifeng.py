@@ -27,7 +27,7 @@ def _link_fix(url: str) -> str:
     return url.replace("http://www.ruanyifeng.com", "https://www.ruanyifeng.com")
 
 def collect(limit: int = 10, fulltext=base.FULLTEXT_DEFAULT, engine: str = "legacy",
-            workers: int = base.DEFAULT_WORKERS, start=None, **_):
+            workers: int = base.DEFAULT_WORKERS, start=base.WINDOW_UNSET, **_):
     items = feedmod.feed_items(FEED_URL, SOURCE, NAME, engine=engine,
                                kind="newsletter", link_fix=_link_fix, limit=limit)
 
@@ -63,7 +63,7 @@ def collect(limit: int = 10, fulltext=base.FULLTEXT_DEFAULT, engine: str = "lega
     return items
 
 def _fetch_bodies(items: list[dict], *, engine: str, fulltext,
-                  workers: int = base.DEFAULT_WORKERS, start=None) -> None:
+                  workers: int = base.DEFAULT_WORKERS, start=base.WINDOW_UNSET) -> None:
     targets = list(base.fulltext_targets(items, fulltext, start))
 
     def body_for(entry: dict) -> dict | None:
