@@ -741,13 +741,23 @@ html:not(.js) .cat-btn{display:none}
 
    `contain-intrinsic-size: auto <n>` hands a skipped element its own last
    rendered height, so the scrollbar does not jump once a row has been seen;
-   the length is only the first estimate, for rows never rendered yet. */
-.tp,.br,.ar,.blk,.cat,.dg-hl{content-visibility:auto}
+   the length is only the first estimate, for rows never rendered yet.
+
+   `.blk` is deliberately not in this list. 派早报's stories carry their dot —
+   the 7px square on the vertical rule beside the body — as `.blk::before` at
+   `left:-30px`, outside the block's own box, and paint containment clips a
+   descendant to that box: the dots disappeared from the page entirely. The
+   list is also where they were worth nothing: the six blocks hold 53 nodes
+   between them, against 19 `.ar` rows in the same panel, and sspai's first
+   switch measures the same with them contained or not (20–37ms, 4× throttle).
+   Anything else added here needs its painting checked for the same reason —
+   `.br::before` is at `left:0` and the lists are `list-style:none`, so nothing
+   else currently reaches outside its box. */
+.tp,.br,.ar,.cat,.dg-hl{content-visibility:auto}
 .tp{contain-intrinsic-size:auto 60px}
 .br{contain-intrinsic-size:auto 48px}
 .ar{contain-intrinsic-size:auto 90px}
 .dg-hl{contain-intrinsic-size:auto 160px}
-.blk{contain-intrinsic-size:auto 340px}
 .cat{contain-intrinsic-size:auto 400px}
 
 /* ======================================================================
